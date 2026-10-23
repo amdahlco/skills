@@ -22,9 +22,11 @@ Samples:
              review must not pass it.
 
 The AI review runs only when ANTHROPIC_API_KEY is set (in Actions, from the
-SKILLS_REVIEW_ANTHROPIC_KEY secret). Without it, the test checks Cisco
-skill-scanner and Betterleaks, says the AI review was skipped, and still
-requires the AI check to be the "did not finish" warning, never a pass.
+SKILLS_REVIEW_ANTHROPIC_KEY secret). When it runs, each of its verdicts must
+also come from ai_review.MODEL (Claude Sonnet 5.5), the one model that reviews
+every skill. Without the key, the test checks Cisco skill-scanner and
+Betterleaks, says the AI review was skipped, and still requires the AI check to
+be the "did not finish" warning, never a pass.
 
 Every check that runs must also have really finished: a "did not finish"
 result fails the test.
@@ -47,6 +49,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import ai_review  # noqa: E402
 import handoff  # noqa: E402
 import normalize  # noqa: E402
 
@@ -90,6 +93,13 @@ def sample_texts() -> dict[str, str]:
     }
 
 
+def from_model(check: dict) -> bool:
+    """True when a finished AI review check says ai_review.MODEL gave its verdict (the first line of details)."""
+    details = check.get("details")
+    head = details.split("\n", 1)[0] if isinstance(details, str) else ""
+    return head.startswith("Verdict: ") and f", from {ai_review.MODEL}." in head
+
+
 def failures(checks_by_sample: dict[str, list[dict]], ai_enabled: bool) -> list[str]:
     """Every way the checks differ from what each sample must get."""
     found: list[str] = []
@@ -103,6 +113,8 @@ def failures(checks_by_sample: dict[str, list[dict]], ai_enabled: bool) -> list[
                 continue
             if check["summary"] == normalize.DID_NOT_FINISH:
                 found.append(f"{name}: {check['by']} did not finish")
+            elif check["by"] == AI and not from_model(check):
+                found.append(f"{name}: {AI} gave no verdict from {ai_review.MODEL}")
         for scanner, allowed in EXPECTED[name].items():
             if scanner == AI and not ai_enabled:
                 continue

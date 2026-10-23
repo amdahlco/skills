@@ -276,6 +276,8 @@ def normalize_betterleaks(findings: Any, checked_at: str) -> dict[str, str]:
 # The AI review (scripts/ai_review.py). Its verdict maps to a result, like a severity.
 VERDICT_RANK = {"pass": 0, "review": 1, "block": 2}
 VERDICT_TO_RESULT = {"pass": "pass", "review": "warn", "block": "fail"}
+# Each check's label, the first words of the AI review's summary. amdahl.ai reads the label
+# back to say in plain words what was flagged, so a label changes here and on the site together.
 AI_CHECK_WORDS = {
     "data_leaving": "Data leaving",
     "hidden_actions": "Hidden actions",
@@ -300,13 +302,15 @@ def effective_verdict(review: dict[str, Any]) -> str:
     return max([review["verdict"], *severities], key=lambda v: VERDICT_RANK[v])
 
 
-def normalize_ai_review(review: dict[str, Any], model: str, checked_at: str, note: str = "") -> dict[str, str]:
+def normalize_ai_review(review: dict[str, Any], model: str, checked_at: str) -> dict[str, str]:
     """A validated AI review (ai_review.parse_review) -> one check.
 
     The summary names the most severe finding by its check, line and why; it
-    never quotes the skill. Details list every finding and say which model gave
-    the final verdict. Quotes of the skill text share a budget of QUOTE_BUDGET
-    characters across all of details.
+    never quotes the skill. amdahl.ai parses it, so its shape is a contract:
+    the finding's AI_CHECK_WORDS label first, then " on line N" when the line
+    is known, then ": " and the why. A pass reads "No findings". Details list
+    every finding and say which model gave the verdict. Quotes of the skill
+    text share a budget of QUOTE_BUDGET characters across all of details.
     """
     verdict = effective_verdict(review)
     result = VERDICT_TO_RESULT[verdict]
@@ -321,10 +325,7 @@ def normalize_ai_review(review: dict[str, Any], model: str, checked_at: str, not
         where = f"{label} on line {top['line']}" if top["line"] else label
         summary = f"{where}: {clean_text(top['why'], SUMMARY_MAX)}"
 
-    head = f"Final verdict: {verdict}, from {model}."
-    if note:
-        head += " " + clean_text(note, 400)
-    head += " The model saw only the SKILL.md text, with no tools."
+    head = f"Verdict: {verdict}, from {model}. The model saw only the SKILL.md text, with no tools."
     lines = [head]
     budget = QUOTE_BUDGET
     for finding in ranked:

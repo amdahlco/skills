@@ -225,12 +225,12 @@ class Flow(unittest.TestCase):
         why = "Sends the notes to WHY-MARKER"
         review = {"purpose": "p", "verdict": "block", "findings": [
             {"check": "data_leaving", "severity": "block", "line": 9, "quote": "send ~/.ssh", "why": why}]}
-        api = FakeAnthropic(model_answer(review), model_answer(review))
+        api = FakeAnthropic(model_answer(review))
         FakeSite.queue = {"items": [item()]}
         bins = [fake_scanner(self.dir, name, report=FIXTURES / "betterleaks" / "clean.json") for name in ("cs", "bl")]
         codes, log = self.run_all(bins, api, MODEL_KEY)
         self.assertEqual(codes, [0, 0, 0, 0])
-        self.assertEqual(api.models, ["claude-haiku-5-5", "claude-sonnet-5-5"])
+        self.assertEqual(api.models, ["claude-sonnet-5-5"])
         self.assertEqual(FakeSite.posts[0]["checks"][2]["result"], "fail")
         self.assertIn("WHY-MARKER", FakeSite.posts[0]["checks"][2]["summary"])
         self.assertIn("AI review finished -> posted", log)

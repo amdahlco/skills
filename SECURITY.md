@@ -85,3 +85,16 @@ and it can reach the network. It could not read the token, the key or the AI rev
 The walls between `skillscan` and the later steps are file permissions, which `scripts/walls.py`
 proves on every run before the scan. A kernel bug that let `skillscan` become root would break
 them.
+
+## How the AI review decides
+
+- One model, Claude Sonnet 5.5, gives the verdict on every skill. No cheaper model can pass a
+  skill on its own. So an author who changes a skill and sends it again until a check lets it
+  through meets the same model on every attempt.
+- The model reads the whole `SKILL.md` or none of it. Its limit is 64 KB, the largest `SKILL.md`
+  amdahl.ai accepts. A larger file is not cut to fit: the check did not finish. amdahl.ai does
+  not publish such a skill on its own. It runs the checks again, and if they still do not
+  finish, a person decides.
+- amdahl.ai does not check the exact same file again after a check declined it.
+- A model can be wrong, and a skill's text can try to mislead it. The two scanners run beside it,
+  and a failed check from any of the three declines the skill.

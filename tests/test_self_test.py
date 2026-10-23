@@ -11,6 +11,7 @@ from pathlib import Path
 
 import support  # noqa: F401 - puts scripts/ on the import path
 
+import ai_review
 import handoff
 import normalize
 import self_test
@@ -20,6 +21,13 @@ DAY = "2026-10-23"
 
 def row(pair: tuple[str, str], result: str) -> dict:
     return {"name": pair[0], "by": pair[1], "result": result, "summary": "x", "checkedAt": DAY}
+
+
+def ai_row(verdict: str, model: str = ai_review.MODEL) -> dict:
+    """An AI review check as normalize builds it, from the given model."""
+    findings = [] if verdict == "pass" else [
+        {"check": "data_leaving", "severity": verdict, "line": 3, "quote": "q", "why": "Sends notes away."}]
+    return normalize.normalize_ai_review({"purpose": "p", "verdict": verdict, "findings": findings}, model, DAY)
 
 
 GOOD_SCANNERS = {"results": [
@@ -71,16 +79,25 @@ class SelfTest(unittest.TestCase):
         self.dir.mkdir()
         self.assertEqual(self.check(), 1)
 
+    def write_ai(self, checks: list[dict]) -> None:
+        handoff.write_private(self.dir / "ai.json", {"keyed": True, "results": [
+            {"position": n, "checks": [check]} for n, check in enumerate(checks)]})
+
     def test_check_grades_the_ai_review_when_it_ran(self) -> None:
         self.dir.mkdir()
         handoff.write_private(self.dir / "scanners.json", GOOD_SCANNERS)
-        verdicts = ["pass", "fail", "warn"]
-        ai = {"keyed": True, "results": [{"position": n, "checks": [row(normalize.AI_REVIEW, v)]}
-                                         for n, v in enumerate(verdicts)]}
-        handoff.write_private(self.dir / "ai.json", ai)
+        self.write_ai([ai_row("pass"), ai_row("block"), ai_row("review")])
         self.assertEqual(self.check(), 0)
-        ai["results"][1]["checks"][0]["result"] = "pass"  # the review let the injection through
-        handoff.write_private(self.dir / "ai.json", ai)
+        self.write_ai([ai_row("pass"), ai_row("pass"), ai_row("review")])  # the review let the injection through
+        self.assertEqual(self.check(), 1)
+
+    def test_check_fails_when_a_verdict_is_not_from_the_one_model(self) -> None:
+        # Sonnet gives the verdict on every skill: a verdict from any other model, or none named, fails.
+        self.dir.mkdir()
+        handoff.write_private(self.dir / "scanners.json", GOOD_SCANNERS)
+        self.write_ai([ai_row("pass", "claude-haiku-5-5"), ai_row("block"), ai_row("review")])
+        self.assertEqual(self.check(), 1)
+        self.write_ai([row(normalize.AI_REVIEW, "pass"), ai_row("block"), ai_row("review")])  # no details at all
         self.assertEqual(self.check(), 1)
 
 

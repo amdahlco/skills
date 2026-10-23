@@ -36,6 +36,7 @@ These rules follow the [Agent Skills specification](https://agentskills.io/speci
   - 1 to 1024 characters.
   - Say what the skill does AND when to use it.
 - Keep the body after the frontmatter under 500 lines. More than 1000 is refused.
+- The whole file must be 64 KB or smaller. The AI security review reads all of it, never part of it.
 - The body must not be empty.
 - `license` is optional. Name a license, for example `MIT` or `Apache-2.0`. See "License" below.
 
@@ -63,6 +64,7 @@ license: MIT
 - Instructions that tell the agent to ignore its rules or the user.
 - Hidden text, such as zero-width characters or white space that hides instructions.
 - Instructions to send data, files or credentials to an outside address.
+- Steps that tell the agent to load instructions or steps from a link while the skill runs. A link to documentation alone does not fail a skill.
 - Steps the agent must hide from the user, or steps that do not fit what the skill says it is for.
 - API keys, tokens or other secrets, even fake ones.
 
@@ -74,7 +76,7 @@ Also leave out customer names and personal data. No check looks for them, so thi
 2. You enter the code we email you, and you get a private link to your submission's status. A submission that is not confirmed within 24 hours expires and is never checked.
 3. Within about ten minutes, [`scan-queue.yml`](.github/workflows/scan-queue.yml) runs the three checks on it: Cisco skill-scanner, Betterleaks and the AI security review. The README section "Checks and review" says how each one works.
 4. If every check passes, the skill publishes automatically and is listed on amdahl.ai/skills.
-   - A warning does not stop it. The skill publishes, and the status page and an email list each warning.
+   - A warning does not stop it. The skill publishes, and the status page and an email list each warning. A warning from the AI review also shows on the skill's public page, as what was flagged and the line only.
    - A possible secret waits for your answer. Remove it and press Check again, or confirm that it is not a real key, and the skill goes live.
    - If a check fails, the skill is declined. The status page and an email say which check, the line and why.
 5. Within an hour of publishing, the mirror writes the skill to `skills/<publisher>/<name>/SKILL.md` here.

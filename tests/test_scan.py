@@ -66,9 +66,20 @@ class ScanWithFakes(unittest.TestCase):
         self.assertEqual([c["name"] for c in checks], ["Threat analysis", "Secrets", "AI security review"])
         self.assertEqual([c["result"] for c in checks], ["fail", "pass", "pass"])
         # The AI review got the SKILL.md the scanners read, byte for byte, one numbered line each.
-        self.assertEqual(api.models, ["claude-haiku-5-5"])
+        self.assertEqual(api.models, ["claude-sonnet-5-5"])
         prompt = api.requests[0]["body"]["messages"][0]["content"]
         self.assertIn("<skill_md>\n1| ---\n2| name: x\n3| ---\n4| hi\n</skill_md>", prompt)
+
+    def test_the_scanners_read_a_file_the_ai_review_will_not(self) -> None:
+        # Over 64 KB the AI review sends nothing and says why; the two scanners still read the file.
+        api = FakeAnthropic()
+        markdown = "x" * (64 * 1024 + 1)
+        with self.fakes(model_key="test-key"), mock.patch.object(urllib.request, "urlopen", api):
+            checks = scan.scan_markdown("a", markdown, "2026-10-22")
+        self.assertEqual([c["result"] for c in checks[:2]], ["fail", "pass"])
+        self.assertEqual((checks[2]["result"], checks[2]["summary"]), ("warn", "Scanner did not finish"))
+        self.assertIn("SKILL.md is 65537 bytes.", checks[2]["details"])
+        self.assertEqual(api.requests, [])
 
     def test_no_model_key_is_did_not_finish(self) -> None:
         api = FakeAnthropic()

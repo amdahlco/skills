@@ -43,7 +43,7 @@ A folder skill, such as system-diagram, is not scanned here. It is Amdahl's own 
 |---|---|---|
 | Threat analysis | [Cisco AI Defense skill-scanner](https://github.com/cisco-ai-defense/skill-scanner) | Prompt injection, data exfiltration and malicious code patterns |
 | Secrets | [Betterleaks](https://github.com/betterleaks/betterleaks) | API keys, tokens and other secrets in the text |
-| AI security review | Amdahl AI review: Claude Haiku 5.5, then Claude Sonnet 5.5 | Instructions that send data away, hide steps, override the agent or the user, change settings, run remote code, delete files, misuse credentials, or do not fit the skill's purpose |
+| AI security review | Amdahl AI review: Claude Sonnet 5.5 | Instructions that send data away, hide steps, override the agent or the user, change settings, run remote code, delete files, misuse credentials, or do not fit the skill's purpose |
 
 How the checks work:
 
@@ -55,26 +55,24 @@ How the checks work:
 
 ### The AI security review
 
-The AI review runs after the two scanners. It has two steps.
-
-1. Claude Haiku 5.5 reviews the `SKILL.md`. If its verdict is pass, the check passes.
-2. If Haiku flags anything, or does not finish, Claude Sonnet 5.5 reviews the same text. Its verdict is final.
+The AI review runs after the two scanners. Claude Sonnet 5.5 reviews every `SKILL.md`, and its verdict is the result of the check. There is no cheaper first pass. If an author changes a skill and sends it again, the same model reviews it again.
 
 A pass verdict passes. A review verdict is a warning. A block verdict fails.
 
-The result of the AI review is private. The author sees it on their status page and in the email. The public page of a skill shows the two scanners only.
+The full findings of the AI review are private. The author sees them on their status page and in the email. If the review gives a warning or a failure, the skill's public page on amdahl.ai shows only what was flagged and the line. It never shows the model's reason or a quote from the skill. A pass shows nothing about the AI review on the public page.
 
-The model checks every instruction against eight checks: data leaving, hidden actions, overrides, persistence, remote code, destructive actions, credentials and purpose mismatch. Normal steps that fit the skill's purpose are not findings. The full rubric is in [`scripts/ai_review.py`](scripts/ai_review.py).
+The model checks every instruction against eight checks: data leaving, hidden actions, overrides, persistence, remote code, destructive actions, credentials and purpose mismatch. Normal steps that fit the skill's purpose are not findings. A skill that tells the agent to load instructions or steps from a link while it runs counts as remote code, and is at least a warning. A link to documentation never fails a skill on its own. The full rubric is in [`scripts/ai_review.py`](scripts/ai_review.py).
 
 What the model gets:
 
 - The `SKILL.md` text with line numbers, and the rubric. Nothing else.
+- The whole file, never part of it. The model reads a `SKILL.md` of up to 64 KB, the largest one amdahl.ai accepts. If a file is larger, it is not cut to fit: the check says "Scanner did not finish" and gives the reason.
 - No tools, no files and no credentials. It cannot run a command or open a link.
 - The skill text is marked as untrusted data to judge, not instructions to follow. Text in a skill that speaks to the reviewer is a finding on its own.
 
 The review sends the text to the Anthropic API over HTTPS. The API key is a repository secret. Only the "AI security review" step gets it, in the queue scan and in the self-test. If Anthropic refuses for the spend limit or the credit balance, the check did not finish, and amdahl.ai runs it again later.
 
-The summary of the check names the most severe finding: its check, its line and the model's reason. It leaves out the quote. The details list every finding and say which model gave the final verdict. Their quotes from the skill add up to 120 characters at most.
+The summary of the check names the most severe finding: its check, its line and the model's reason. It leaves out the quote. The details list every finding and say which model gave the verdict. Their quotes from the skill add up to 120 characters at most.
 
 No check is perfect. In June 2026, [Trail of Bits](https://blog.trailofbits.com/2026/06/03/the-sorry-state-of-skill-distribution/) got malicious skills past every scanner they tested, Cisco's skill-scanner among them. Pattern rules miss an instruction that looks normal. The AI review compares each instruction with the purpose the skill states. It can still be wrong.
 
@@ -102,7 +100,7 @@ scripts/
   sandbox.sh            runs the two scanners as an unprivileged user (in Actions)
   walls.py              proves that user cannot change what the later steps run
   scan.py               runs the three checks on one skill folder
-  ai_review.py          the two-step AI security review (Anthropic API)
+  ai_review.py          the AI security review (Anthropic API)
   self_test.py          checks each verdict on known samples
   normalize.py          turns scanner and review output into pass, warn or fail
   scan_queue.py         queue client for amdahl.ai: claim, scan, ai-review, post

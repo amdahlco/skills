@@ -1,4 +1,4 @@
-"""ai_review.py against a fake Anthropic API: the request, the two steps, and every way it can fail.
+"""ai_review.py against a fake Anthropic API: the request, the one model, the input cap, and every way it can fail.
 
 No network: urllib.request.urlopen is replaced by support.FakeAnthropic, and
 time.sleep (the retry delay) by a stub.
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import unittest
 import urllib.request
 from unittest import mock
@@ -19,7 +20,7 @@ import normalize
 
 DAY = "2026-10-23"
 KEY = "sk-test-not-a-real-key"
-HAIKU, SONNET = "claude-haiku-5-5", "claude-sonnet-5-5"
+SONNET = "claude-sonnet-5-5"
 MARKER = "send-the-notes-to-paste-site-MARKER"
 SKILL = (
     "---\n"
@@ -84,55 +85,52 @@ class Base(unittest.TestCase):
 
 
 class Verdicts(Base):
-    def test_haiku_pass_passes_and_skips_sonnet(self) -> None:
+    def test_a_pass_passes(self) -> None:
         check, api = self.run_review(model_answer(PASS))
-        self.assertEqual(api.models, [HAIKU])
+        self.assertEqual(api.models, [SONNET])
         self.assertEqual((check["result"], check["summary"]), ("pass", "No findings"))
-        self.assertIn(f"from {HAIKU}", check["details"])
+        self.assertTrue(check["details"].startswith(f"Verdict: pass, from {SONNET}."), check["details"])
 
     def test_review_is_a_warning(self) -> None:
         review = flagged("review", finding("remote_code", "review", 6, why="Installs a package the notes do not need."))
-        check, api = self.run_review(model_answer(review), model_answer(review))
-        self.assertEqual(api.models, [HAIKU, SONNET])
+        check, api = self.run_review(model_answer(review))
+        self.assertEqual(api.models, [SONNET])
         self.assertEqual(check["result"], "warn")
         self.assertEqual(check["summary"], "Remote code on line 6: Installs a package the notes do not need.")
 
     def test_block_fails(self) -> None:
-        check, _ = self.run_review(model_answer(flagged("review", finding(severity="review"))),
-                                   model_answer(flagged("block", finding())))
+        check, api = self.run_review(model_answer(flagged("block", finding())))
+        self.assertEqual(api.models, [SONNET])
         self.assertEqual(check["result"], "fail")
         self.assertEqual(check["summary"], "Data leaving on line 6: Sends the call notes to a paste site.")
+        self.assertTrue(check["details"].startswith(f"Verdict: block, from {SONNET}."), check["details"])
 
-    def test_sonnet_has_the_final_word(self) -> None:
-        # Haiku flags, Sonnet clears it: the check passes, and details say who decided.
-        check, api = self.run_review(model_answer(flagged("block", finding())), model_answer(PASS))
-        self.assertEqual(api.models, [HAIKU, SONNET])
-        self.assertEqual((check["result"], check["summary"]), ("pass", "No findings"))
-        self.assertIn(f"Final verdict: pass, from {SONNET}.", check["details"])
-        self.assertIn(f"{HAIKU} flagged it first.", check["details"])
-
-    def test_haiku_flag_sends_sonnet_the_same_text(self) -> None:
-        _, api = self.run_review(model_answer(flagged("review", finding(severity="review"))), model_answer(PASS))
-        first, second = (request["body"] for request in api.requests)
-        self.assertEqual(first["messages"], second["messages"])
-        self.assertEqual(first["system"], second["system"])
-        self.assertEqual({**first, "model": SONNET}, second)
+    def test_every_verdict_comes_from_the_one_model_in_one_call(self) -> None:
+        # Owner decision 2026-10-23: no cheaper first pass whose pass alone publishes a skill.
+        self.assertEqual(ai_review.MODEL, SONNET)
+        for name in ("FIRST_MODEL", "FINAL_MODEL"):
+            self.assertFalse(hasattr(ai_review, name), name)
+        for answer in (PASS, flagged("review", finding(severity="review")), flagged("block", finding())):
+            check, api = self.run_review(model_answer(answer))
+            self.assertEqual(api.models, [SONNET], answer["verdict"])
+            self.assertNotIn("haiku", json.dumps(api.requests).lower())
+            self.assertNotIn("haiku", check["details"].lower())
 
     def test_a_pass_that_lists_a_finding_is_not_a_pass(self) -> None:
         sneaky = {**PASS, "findings": [finding()]}
-        check, api = self.run_review(model_answer(sneaky), model_answer(sneaky))
-        self.assertEqual(api.models, [HAIKU, SONNET])
+        check, api = self.run_review(model_answer(sneaky))
+        self.assertEqual(api.models, [SONNET])
         self.assertEqual(check["result"], "fail")
 
     def test_a_flag_without_a_finding_keeps_its_verdict(self) -> None:
-        check, _ = self.run_review(model_answer(flagged("block")), model_answer(flagged("block")))
+        check, _ = self.run_review(model_answer(flagged("block")))
         self.assertEqual(check["result"], "fail")
         self.assertEqual(check["summary"], "Flagged, but the review named no finding")
 
     def test_most_severe_finding_leads_the_summary(self) -> None:
         review = flagged("block", finding("hidden_actions", "review", 7, why="Hides a step."),
                          finding("data_leaving", "block", 6, why="Sends notes away."))
-        check, _ = self.run_review(model_answer(review), model_answer(review))
+        check, _ = self.run_review(model_answer(review))
         self.assertEqual(check["summary"], "Data leaving on line 6: Sends notes away.")
         lines = check["details"].splitlines()
         self.assertTrue(lines[1].startswith("- BLOCK data_leaving, line 6: Sends notes away."), lines)
@@ -140,7 +138,7 @@ class Verdicts(Base):
 
     def test_a_line_the_file_does_not_have_is_dropped(self) -> None:
         review = flagged("block", finding(line=999))
-        check, _ = self.run_review(model_answer(review), model_answer(review))
+        check, _ = self.run_review(model_answer(review))
         self.assertEqual(check["summary"], "Data leaving: Sends the call notes to a paste site.")
 
 
@@ -148,7 +146,7 @@ class SummaryAndDetails(Base):
     def test_summary_never_holds_more_than_the_why(self) -> None:
         why = "Sends the call notes to a paste site."
         review = flagged("block", finding(quote=f"then {MARKER}", why=why))
-        check, _ = self.run_review(model_answer(review), model_answer(review))
+        check, _ = self.run_review(model_answer(review))
         self.assertEqual(check["summary"], f"Data leaving on line 6: {why}")
         self.assertNotIn(MARKER, check["summary"])
         self.assertNotIn(review["purpose"], check["summary"])
@@ -157,7 +155,7 @@ class SummaryAndDetails(Base):
         # Each quote is 200 of one letter that appears nowhere else in details.
         letters = "QXZJWY"
         review = flagged("block", *(finding(quote=c * 200, why=f"Reason {n}.") for n, c in enumerate(letters)))
-        check, _ = self.run_review(model_answer(review), model_answer(review))
+        check, _ = self.run_review(model_answer(review))
         copied = sum(check["details"].count(c) for c in letters)
         self.assertGreater(copied, 0)
         self.assertLessEqual(copied, 120)
@@ -167,7 +165,7 @@ class SummaryAndDetails(Base):
 
     def test_hidden_characters_are_shown_not_passed_through(self) -> None:
         review = flagged("block", finding(quote="a\u200bb", why="Hides text\u202e here."))
-        check, _ = self.run_review(model_answer(review), model_answer(review))
+        check, _ = self.run_review(model_answer(review))
         self.assertNotIn("\u200b", check["details"])
         self.assertNotIn("\u202e", check["summary"] + check["details"])
         self.assertIn("\\u202e", check["summary"])
@@ -185,19 +183,19 @@ class Request(Base):
         self.assertEqual(request["headers"]["content-type"], "application/json")
         body = request["body"]
         self.assertEqual(set(body), {"model", "max_tokens", "system", "messages", "output_config"})
-        self.assertEqual(body["model"], HAIKU)
+        self.assertEqual(body["model"], SONNET)
         self.assertEqual(body["max_tokens"], 4000)
         self.assertEqual(body["system"], ai_review.SYSTEM_PROMPT)
         self.assertEqual(body["output_config"], {"format": {"type": "json_schema", "schema": ai_review.RESPONSE_SCHEMA}})
 
     def test_no_tools_no_sampling_parameters(self) -> None:
-        _, api = self.run_review(model_answer(flagged("review", finding(severity="review"))), model_answer(PASS))
+        _, api = self.run_review(model_answer(flagged("review", finding(severity="review"))))
         for request in api.requests:
             for field in ("tools", "tool_choice", "temperature", "top_p", "top_k", "thinking", "mcp_servers"):
                 self.assertNotIn(field, request["body"])
 
     def test_skill_text_only_in_the_user_message_inside_the_tags(self) -> None:
-        _, api = self.run_review(model_answer(flagged("review", finding(severity="review"))), model_answer(PASS))
+        _, api = self.run_review(model_answer(flagged("review", finding(severity="review"))))
         for request in api.requests:
             body = request["body"]
             self.assertEqual(json.dumps(body).count(MARKER), 1)
@@ -237,58 +235,54 @@ class Failures(Base):
             self.assertIn("ANTHROPIC_API_KEY is not set", check["details"])
             self.assertEqual(api.requests, [])
 
-    def test_http_500_twice_on_both_models_is_did_not_finish(self) -> None:
-        check, api = self.run_review(http_error(500), http_error(500), http_error(500), http_error(500))
-        self.assertEqual(api.models, [HAIKU, HAIKU, SONNET, SONNET])
+    def test_http_500_twice_is_did_not_finish_with_no_other_model(self) -> None:
+        check, api = self.run_review(http_error(500), http_error(500))
+        self.assertEqual(api.models, [SONNET, SONNET])  # one retry of the same request, nothing more
         self.assert_did_not_finish(check)
-        self.assertIn("HTTP 500, after one retry", check["details"])
-        self.assertEqual(self.sleep.call_count, 2)
+        self.assertIn(f"{SONNET} did not finish: HTTP 500, after one retry", check["details"])
+        self.assertEqual(self.sleep.call_count, 1)
 
     def test_one_retry_recovers(self) -> None:
         overloaded = b'{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'
         check, api = self.run_review(http_error(529, overloaded), model_answer(PASS))
-        self.assertEqual(api.models, [HAIKU, HAIKU])
+        self.assertEqual(api.models, [SONNET, SONNET])
         self.assertEqual(check["result"], "pass")
 
     def test_rate_limit_and_timeout_are_retried(self) -> None:
-        check, api = self.run_review(http_error(429), TimeoutError("timed out"), TimeoutError(), TimeoutError())
-        self.assertEqual(api.models, [HAIKU, HAIKU, SONNET, SONNET])
+        check, api = self.run_review(http_error(429), TimeoutError("timed out"))
+        self.assertEqual(api.models, [SONNET, SONNET])
         self.assert_did_not_finish(check)
         self.assertIn("no answer within 60 seconds", check["details"])
+        check, api = self.run_review(TimeoutError(), TimeoutError())
+        self.assertEqual(api.models, [SONNET, SONNET])
+        self.assert_did_not_finish(check)
 
     def test_a_client_error_is_not_retried(self) -> None:
         bad = b'{"type":"error","error":{"type":"invalid_request_error","message":"bad field"}}'
-        check, api = self.run_review(http_error(400, bad), http_error(401))
-        self.assertEqual(api.models, [HAIKU, SONNET])
+        check, api = self.run_review(http_error(400, bad))
+        self.assertEqual(api.models, [SONNET])
         self.assert_did_not_finish(check)
         self.assertIn("invalid_request_error: bad field", check["details"])
         self.sleep.assert_not_called()
 
-    def test_haiku_failure_falls_through_to_sonnet(self) -> None:
-        check, api = self.run_review(http_error(500), http_error(500), model_answer(flagged("block", finding())))
-        self.assertEqual(api.models, [HAIKU, HAIKU, SONNET])
-        self.assertEqual(check["result"], "fail")
-        self.assertIn(f"{HAIKU} did not finish (HTTP 500, after one retry).", check["details"])
-        self.assertIn(f"from {SONNET}", check["details"])
-
     def test_malformed_json_is_did_not_finish(self) -> None:
-        check, _ = self.run_review(model_answer(text="{not json"), model_answer(text='{"verdict": "pass"'))
-        self.assert_did_not_finish(check)
-        self.assertIn("not JSON", check["details"])
+        for text in ("{not json", '{"verdict": "pass"'):
+            check, _ = self.run_review(model_answer(text=text))
+            self.assert_did_not_finish(check)
+            self.assertIn("not JSON", check["details"])
 
     def test_refusal_is_did_not_finish(self) -> None:
         empty = {**model_answer(PASS), "content": [], "stop_reason": "refusal"}
-        check, _ = self.run_review(empty, empty)
+        check, _ = self.run_review(empty)
         self.assert_did_not_finish(check)
         self.assertIn("refusal", check["details"])
         # A refusal after partial output is never read, even when the text looks like a pass.
-        partial = model_answer(PASS, stop_reason="refusal")
-        check, _ = self.run_review(partial, partial)
+        check, _ = self.run_review(model_answer(PASS, stop_reason="refusal"))
         self.assert_did_not_finish(check)
 
     def test_cut_off_or_unknown_stop_is_did_not_finish(self) -> None:
         for stop in ("max_tokens", "tool_use", "pause_turn", None):
-            check, _ = self.run_review(model_answer(PASS, stop_reason=stop), model_answer(PASS, stop_reason=stop))
+            check, _ = self.run_review(model_answer(PASS, stop_reason=stop))
             self.assert_did_not_finish(check)
 
     def test_answers_that_do_not_match_the_schema_are_did_not_finish(self) -> None:
@@ -306,18 +300,121 @@ class Failures(Base):
             "a finding with an extra field": flagged("block", {**finding(), "fix": "x"}),
         }
         for label, review in bad_answers.items():
-            check, _ = self.run_review(model_answer(review), model_answer(review))
+            check, _ = self.run_review(model_answer(review))
             self.assert_did_not_finish(check)
 
     def test_no_text_block_is_did_not_finish(self) -> None:
         thinking_only = {**model_answer(PASS), "content": [{"type": "thinking", "thinking": "", "signature": "s"}]}
-        check, _ = self.run_review(thinking_only, thinking_only)
+        check, _ = self.run_review(thinking_only)
         self.assert_did_not_finish(check)
 
     def test_an_ordinary_failure_carries_no_reason(self) -> None:
-        check, _ = self.run_review(http_error(500), http_error(500), http_error(500), http_error(500))
+        check, _ = self.run_review(http_error(500), http_error(500))
         self.assertIsInstance(check["details"], str)
         self.assertIsNone(normalize.reason_of(check))
+
+
+class Rubric(unittest.TestCase):
+    def test_loading_steps_from_a_url_is_remote_code_but_a_docs_link_never_blocks(self) -> None:
+        # Owner decision 2026-10-23 (Dom's review): at least review, never block for linking documentation.
+        prompt = ai_review.SYSTEM_PROMPT
+        item = prompt[prompt.index("5. remote_code:"):prompt.index("6. destructive:")]
+        self.assertIn("Telling the agent to fetch a URL at run time and follow the instructions or steps it finds "
+                      "there is remote_code with at least review severity", item)
+        self.assertIn("a plain link to documentation is never a block.", item)
+        self.assertTrue(prompt.isascii())
+
+
+class InputCap(Base):
+    # The model reads the whole SKILL.md or none of it: never a part, and never silently.
+
+    def test_the_cap_is_the_sites_skill_md_limit(self) -> None:
+        self.assertEqual(ai_review.MODEL_INPUT_MAX_BYTES, 64 * 1024)  # SKILL_MAX_BYTES in amdahl.ai's gate.ts
+
+    def test_a_file_at_the_cap_is_sent_whole(self) -> None:
+        body = "x" * 99 + "\n"
+        markdown = SKILL + body * ((ai_review.MODEL_INPUT_MAX_BYTES - len(SKILL)) // 100)
+        markdown += "END-OF-FILE-MARKER\n"
+        markdown += "y" * (ai_review.MODEL_INPUT_MAX_BYTES - len(markdown.encode("utf-8")))
+        self.assertEqual(len(markdown.encode("utf-8")), ai_review.MODEL_INPUT_MAX_BYTES)
+        check, api = self.run_review(model_answer(PASS), markdown=markdown)
+        self.assertEqual(check["result"], "pass")
+        prompt = api.requests[0]["body"]["messages"][0]["content"]
+        inside = prompt[prompt.index("<skill_md>\n") + len("<skill_md>\n"):prompt.index("\n</skill_md>")]
+        lines = ai_review.skill_lines(markdown)
+        self.assertEqual(inside.count("\n") + 1, len(lines))
+        self.assertIn(f"{len(lines) - 1}| END-OF-FILE-MARKER", inside)
+        self.assertTrue(inside.endswith(f"{len(lines)}| " + lines[-1]))
+
+    def test_one_byte_over_is_did_not_finish_and_nothing_is_sent(self) -> None:
+        markdown = "a" * (ai_review.MODEL_INPUT_MAX_BYTES + 1)
+        check, api = self.run_review(markdown=markdown)
+        self.assertEqual(api.requests, [])
+        self.assert_did_not_finish(check)
+        self.assertIsNone(normalize.reason_of(check))  # not the budget signal
+        self.assertIn("SKILL.md is 65537 bytes.", check["details"])
+        self.assertIn("at most 65536 bytes (64 KB, amdahl.ai's SKILL.md limit)", check["details"])
+        self.assertIn("never only part of one, so it did not review this file.", check["details"])
+
+    def test_the_cap_counts_utf8_bytes_not_characters(self) -> None:
+        markdown = "\u00e9" * (ai_review.MODEL_INPUT_MAX_BYTES // 2 + 1)  # 2 bytes each in UTF-8
+        self.assertLess(len(markdown), ai_review.MODEL_INPUT_MAX_BYTES)
+        check, api = self.run_review(markdown=markdown)
+        self.assertEqual(api.requests, [])
+        self.assert_did_not_finish(check)
+        self.assertIn(f"SKILL.md is {ai_review.MODEL_INPUT_MAX_BYTES + 2} bytes.", check["details"])
+
+    def test_too_large_is_said_even_without_a_key(self) -> None:
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        check, api = self.run_review(markdown="a" * (ai_review.MODEL_INPUT_MAX_BYTES + 1))
+        self.assertEqual(api.requests, [])
+        self.assertIn("did not review this file", check["details"])
+
+
+LABEL = "|".join(re.escape(label) for label in normalize.AI_CHECK_WORDS.values())
+# How amdahl.ai reads a flagged AI review summary: the label first, " on line N" when known, then ": why".
+SITE_SUMMARY = re.compile(rf"^(?P<label>{LABEL})(?: on line (?P<line>[1-9]\d{{0,5}}))?: (?P<why>.+)$")
+
+
+class SummaryFormat(Base):
+    # The summary format is a contract with amdahl.ai, which shows the flagged check in plain words.
+
+    def test_the_eight_labels_are_the_sites_words(self) -> None:
+        self.assertEqual(tuple(normalize.AI_CHECK_WORDS), ai_review.CHECKS)
+        self.assertEqual(normalize.AI_CHECK_WORDS, {
+            "data_leaving": "Data leaving", "hidden_actions": "Hidden actions", "overrides": "Overrides",
+            "persistence": "Persistence", "remote_code": "Remote code", "destructive": "Destructive actions",
+            "credentials": "Credentials", "purpose_mismatch": "Purpose mismatch",
+        })
+        for label in normalize.AI_CHECK_WORDS.values():
+            self.assertNotIn(":", label)
+            self.assertNotIn("line", label.lower())
+
+    def test_label_then_line_then_why_for_every_check(self) -> None:
+        why = "Says what is wrong."
+        for check_id, label in normalize.AI_CHECK_WORDS.items():
+            for severity, result in (("review", "warn"), ("block", "fail")):
+                for line, expected in ((6, f"{label} on line 6: {why}"), (None, f"{label}: {why}")):
+                    review = flagged(severity, finding(check_id, severity, line, why=why))
+                    check, _ = self.run_review(model_answer(review))
+                    self.assertEqual((check["result"], check["summary"]), (result, expected))
+                    parsed = SITE_SUMMARY.fullmatch(check["summary"])
+                    self.assertIsNotNone(parsed, check["summary"])
+                    self.assertEqual(parsed["label"], label)
+                    self.assertEqual(parsed["line"], None if line is None else str(line))
+                    self.assertEqual(parsed["why"], why)
+
+    def test_a_why_that_names_a_line_does_not_move_the_label_or_the_line(self) -> None:
+        review = flagged("review", finding("remote_code", "review", None, why="Loads steps from a URL on line 40: x."))
+        check, _ = self.run_review(model_answer(review))
+        parsed = SITE_SUMMARY.fullmatch(check["summary"])
+        self.assertEqual((parsed["label"], parsed["line"]), ("Remote code", None))
+
+    def test_a_pass_and_an_empty_flag_carry_no_label(self) -> None:
+        for answer, summary in ((PASS, "No findings"), (flagged("review"), "Flagged, but the review named no finding")):
+            check, _ = self.run_review(model_answer(answer))
+            self.assertEqual(check["summary"], summary)
+            self.assertIsNone(SITE_SUMMARY.fullmatch(check["summary"]))
 
 
 def error_body(kind: str, message: str, error_code: str | None = None) -> bytes:
@@ -357,16 +454,15 @@ class Budget(Base):
             self.sleep.reset_mock()
             check, api = self.run_review(http_error(status, body))
             self.assert_budget(check)
-            self.assertEqual(api.models, [HAIKU], label)  # no retry, and no second model
+            self.assertEqual(api.models, [SONNET], label)  # no retry
             self.sleep.assert_not_called()
             self.assertIn(f"HTTP {status}", check["details"]["text"], label)
 
-    def test_a_refusal_for_money_on_the_second_model_is_the_budget_signal(self) -> None:
-        check, api = self.run_review(model_answer(flagged("review", finding(severity="review"))),
-                                     http_error(*CREDIT_LOW))
-        self.assertEqual(api.models, [HAIKU, SONNET])
+    def test_a_refusal_for_money_on_the_retry_is_the_budget_signal(self) -> None:
+        check, api = self.run_review(http_error(500), http_error(*CREDIT_LOW))
+        self.assertEqual(api.models, [SONNET, SONNET])
         self.assert_budget(check)
-        self.assertIn(f"{HAIKU} flagged it first.", check["details"]["text"])
+        self.assertTrue(check["details"]["text"].startswith(f"{SONNET}: Anthropic refused"), check["details"])
 
     def test_other_refusals_are_not_the_budget_signal(self) -> None:
         cases = {

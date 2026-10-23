@@ -40,7 +40,7 @@ class Readme(unittest.TestCase):
         checks = section(self.text, "## Checks and review")
         for name, by in (normalize.CISCO, normalize.BETTERLEAKS, normalize.AI_REVIEW):
             self.assertRegex(checks, rf"(?m)^\| {name} \| ", name)
-        self.assertIn("| AI security review | Amdahl AI review: Claude Haiku 5.5, then Claude Sonnet 5.5 |", checks)
+        self.assertIn("| AI security review | Amdahl AI review: Claude Sonnet 5.5 |", checks)
         self.assertNotIn("SkillSpector", self.text)
 
     def test_publishing_is_automatic_and_says_so(self) -> None:
@@ -58,12 +58,51 @@ class Readme(unittest.TestCase):
         checks = section(self.text, "## Checks and review")
         self.assertNotIn("No AI model sees the skill", self.text)
         self.assertNotIn("holds no model keys", self.text)
-        self.assertIn("1. Claude Haiku 5.5 reviews the `SKILL.md`. If its verdict is pass, the check passes.", checks)
-        self.assertIn("Claude Sonnet 5.5 reviews the same text. Its verdict is final.", checks)
+        self.assertIn("Claude Sonnet 5.5 reviews every `SKILL.md`, and its verdict is the result of the check. "
+                      "There is no cheaper first pass.", checks)
         self.assertIn("No tools, no files and no credentials.", checks)
         self.assertIn("Their quotes from the skill add up to 120 characters at most.", checks)
-        self.assertEqual((ai_review.FIRST_MODEL, ai_review.FINAL_MODEL), ("claude-haiku-5-5", "claude-sonnet-5-5"))
+        self.assertEqual(ai_review.MODEL, "claude-sonnet-5-5")
         self.assertEqual(normalize.QUOTE_BUDGET, 120)
+
+    def test_no_text_describes_a_first_model_or_a_two_step_review(self) -> None:
+        # Owner decision 2026-10-23: one model gives the verdict on every skill.
+        for label in ("README.md", "CONTRIBUTING.md", "SECURITY.md"):
+            text = read(label)
+            self.assertNotIn("Haiku", text, label)
+            self.assertNotIn("It has two steps", text, label)
+            self.assertNotIn("two-step", text, label)
+            self.assertNotIn("final verdict", text.lower(), label)
+        self.assertIn("One model, Claude Sonnet 5.5, gives the verdict on every skill.", flat(read("SECURITY.md")))
+
+    def test_the_model_input_cap_is_stated_as_the_code_has_it(self) -> None:
+        self.assertEqual(ai_review.MODEL_INPUT_MAX_BYTES, 64 * 1024)
+        self.assertIn("The model reads a `SKILL.md` of up to 64 KB, the largest one amdahl.ai accepts. If a file is "
+                      "larger, it is not cut to fit", flat(self.text))
+        self.assertIn("The whole file must be 64 KB or smaller.", read("CONTRIBUTING.md"))
+        self.assertIn("The model reads the whole `SKILL.md` or none of it. Its limit is 64 KB", flat(read("SECURITY.md")))
+
+    def test_loading_steps_from_a_link_is_documented_as_remote_code(self) -> None:
+        self.assertIn("A skill that tells the agent to load instructions or steps from a link while it runs counts as "
+                      "remote code, and is at least a warning. A link to documentation never fails a skill on its own.",
+                      flat(self.text))
+        self.assertIn("A link to documentation alone does not fail a skill.", read("CONTRIBUTING.md"))
+
+    def test_public_ai_warning_is_described_as_the_site_shows_it(self) -> None:
+        # Owner decision 2026-10-23 evening: an AI warning shows publicly as what was flagged and the
+        # line (amdahl.ai lib/skills/ai-warning.ts), never the model's words; a pass shows nothing.
+        checks = flat(section(self.text, "## Checks and review"))
+        for label in ("README.md", "CONTRIBUTING.md", "SECURITY.md"):
+            text = flat(read(label))
+            self.assertNotIn("shows the two scanners only", text, label)
+            self.assertNotIn("The result of the AI review is private.", text, label)
+        self.assertIn("The full findings of the AI review are private. The author sees them on their status page "
+                      "and in the email.", checks)
+        self.assertIn("If the review gives a warning or a failure, the skill's public page on amdahl.ai shows only "
+                      "what was flagged and the line. It never shows the model's reason or a quote from the skill. "
+                      "A pass shows nothing about the AI review on the public page.", checks)
+        self.assertIn("A warning from the AI review also shows on the skill's public page, as what was flagged and "
+                      "the line only.", flat(read("CONTRIBUTING.md")))
 
     def test_install_covers_both_kinds_from_amdahl_ai(self) -> None:
         # Saving a folder skill's SKILL.md alone leaves out the files it runs.
@@ -89,7 +128,7 @@ class Contributing(unittest.TestCase):
 class LogPromise(unittest.TestCase):
     def test_no_text_says_the_logs_carry_an_id_or_the_ai_verdict(self) -> None:
         # The logs are public. An older submission's id still opens its status on amdahl.ai,
-        # and the AI review's result is shown to the author only.
+        # and the AI review's full findings are shown to the author only.
         for label, raw in (("scan_queue.py", scan_queue.__doc__ or ""),
                            ("scan-queue.yml", read(".github", "workflows", "scan-queue.yml"))):
             text = " ".join(raw.replace("#", " ").split())
@@ -175,6 +214,12 @@ class Security(unittest.TestCase):
     def test_the_model_key_is_marked_as_needing_sign_off(self) -> None:
         self.assertIn("**A model API key. Needs agu's sign-off; not approved yet.** The repo also holds "
                       "`SKILLS_REVIEW_ANTHROPIC_KEY`", self.text)
+
+    def test_an_unfinished_check_is_not_said_to_block_a_person(self) -> None:
+        # A submission held after its checks keep failing to finish waits for a person, who may publish it.
+        self.assertNotIn("does not publish a skill whose checks did not finish", self.text)
+        self.assertIn("amdahl.ai does not publish such a skill on its own. It runs the checks again, and if they "
+                      "still do not finish, a person decides.", self.text)
 
     def test_residual_risk_is_stated(self) -> None:
         self.assertIn("Residual risk: code that runs inside the AI review step could read the Anthropic key, and "

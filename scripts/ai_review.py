@@ -1,13 +1,19 @@
-"""The two-step AI security review of one SKILL.md, over the Anthropic Messages API.
+"""The AI security review of one SKILL.md, over the Anthropic Messages API.
 
-Step 1: FIRST_MODEL reviews the text. A pass from it is the check's result.
-Step 2: on anything else (a flag, or a first step that did not finish),
-FINAL_MODEL reviews the same text, and its verdict is final.
+MODEL (Claude Sonnet 5.5) reviews every skill, and its verdict is the check's
+result. There is no cheaper first pass (owner decision, 2026-10-23): a pass
+from a cheaper model alone would publish a skill, so an author could change a
+skill and send it again until that model let it through. Every attempt now
+meets the same model.
 
 The model gets the skill text and the rubric only: no tools, no files and no
 credentials. The skill text sits in the user message between <skill_md> tags
 and is called untrusted data there. The answer must match RESPONSE_SCHEMA
 (structured outputs, `output_config.format`).
+
+The model reads the whole SKILL.md or none of it. A SKILL.md larger than
+MODEL_INPUT_MAX_BYTES (64 KB of UTF-8, amdahl.ai's own SKILL.md limit) is never
+cut to fit: the check did not finish, and its details say why.
 
 The API key comes from ANTHROPIC_API_KEY. No key, an HTTP error after one
 retry, a timeout, a refusal or an answer that does not match the schema means
@@ -15,9 +21,9 @@ the check did not finish (a warning). A check never passes by default.
 
 The budget signal: when Anthropic refuses for money (a spend limit, the
 monthly spend cap, the credit balance or billing; see is_budget_refusal), the
-review stops at once, with no retry and no second model, and the check did not
-finish with details.reason "budget". amdahl.ai then queues the skill again
-without counting an attempt, and tells the team once.
+review stops at once, with no retry, and the check did not finish with
+details.reason "budget". amdahl.ai then queues the skill again without
+counting an attempt, and tells the team once.
 
 Nothing here prints. This repo's Actions logs are public.
 
@@ -44,8 +50,10 @@ import normalize  # noqa: E402
 
 API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
-FIRST_MODEL = "claude-haiku-5-5"
-FINAL_MODEL = "claude-sonnet-5-5"
+MODEL = "claude-sonnet-5-5"
+# The largest SKILL.md the model reads, in bytes of UTF-8. Must equal SKILL_MAX_BYTES
+# in amdahl.ai's lib/skills/gate.ts, so that every SKILL.md the site accepts is read whole.
+MODEL_INPUT_MAX_BYTES = 64 * 1024
 MAX_TOKENS = 4000
 TIMEOUT_SECONDS = 60
 RETRY_DELAY_SECONDS = 5
@@ -76,6 +84,9 @@ SYSTEM_PROMPT = (
     "skills, package registries, or permission modes. "
     "5. remote_code: downloading and running code, obfuscated or encoded commands, unknown or "
     "misspelled packages, installs the purpose does not need. "
+    "Telling the agent to fetch a URL at run time and follow the instructions or steps it finds there "
+    "is remote_code with at least review severity, because nobody checked that text; a plain link to "
+    "documentation is never a block. "
     "6. destructive: deleting or overwriting the user's files, history or records without asking them "
     "first. "
     "7. credentials: asking for, reading, printing or storing passwords, keys or tokens beyond what the "
@@ -355,27 +366,30 @@ def budget_check(checked_at: str, text: str) -> dict[str, Any]:
     return normalize.did_not_finish(normalize.AI_REVIEW, checked_at, text, code=normalize.BUDGET)
 
 
+def too_large_reason(size: int) -> str:
+    """Why a SKILL.md over MODEL_INPUT_MAX_BYTES was not reviewed. It says that nothing was cut to fit."""
+    return (f"SKILL.md is {size} bytes. The AI review reads a SKILL.md of at most {MODEL_INPUT_MAX_BYTES} "
+            f"bytes ({MODEL_INPUT_MAX_BYTES // 1024} KB, amdahl.ai's SKILL.md limit), and never only part "
+            "of one, so it did not review this file.")
+
+
 def review(markdown: str, checked_at: str) -> dict[str, Any]:
-    """Review one SKILL.md and return the 'AI security review' check. Never raises ReviewError."""
+    """Review one SKILL.md with MODEL and return the 'AI security review' check. Never raises ReviewError.
+
+    A SKILL.md over MODEL_INPUT_MAX_BYTES is not sent at all: the check did not finish.
+    """
+    size = len(markdown.encode("utf-8"))
+    if size > MODEL_INPUT_MAX_BYTES:
+        return normalize.did_not_finish(normalize.AI_REVIEW, checked_at, too_large_reason(size))
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
         return normalize.did_not_finish(normalize.AI_REVIEW, checked_at, "ANTHROPIC_API_KEY is not set")
     prompt = user_message(markdown)
     line_count = len(skill_lines(markdown))
     try:
-        first = run_model(FIRST_MODEL, prompt, api_key, line_count)
+        verdict = run_model(MODEL, prompt, api_key, line_count)
     except BudgetError as error:
-        return budget_check(checked_at, f"{FIRST_MODEL}: {error}")
+        return budget_check(checked_at, f"{MODEL}: {error}")
     except ReviewError as error:
-        note = f"{FIRST_MODEL} did not finish ({error})."
-    else:
-        if normalize.effective_verdict(first) == "pass":
-            return normalize.normalize_ai_review(first, FIRST_MODEL, checked_at)
-        note = f"{FIRST_MODEL} flagged it first."
-    try:
-        final = run_model(FINAL_MODEL, prompt, api_key, line_count)
-    except BudgetError as error:
-        return budget_check(checked_at, f"{note} {FINAL_MODEL}: {error}")
-    except ReviewError as error:
-        return normalize.did_not_finish(normalize.AI_REVIEW, checked_at, f"{note} {FINAL_MODEL} did not finish: {error}")
-    return normalize.normalize_ai_review(final, FINAL_MODEL, checked_at, note)
+        return normalize.did_not_finish(normalize.AI_REVIEW, checked_at, f"{MODEL} did not finish: {error}")
+    return normalize.normalize_ai_review(verdict, MODEL, checked_at)
