@@ -10,6 +10,13 @@ mirror: an empty catalog never removes existing skills, and one run never
 removes more than half of them (at least 5 may always go). Pass
 --allow-mass-removal to override both.
 
+Each skill folder also gets a README.md, written by the mirror: three ways to
+install the skill from amdahl.ai (the prompt on its page, its .md file, or
+`npx amdahl skills add <publisher>/<name>`). GitHub shows it to anyone who opens the folder here, so a reader
+who finds a skill on GitHub installs it from amdahl.ai, where the install is
+counted. The note is text only: it calls nothing, and SKILL.md stays the
+exact bytes the site serves.
+
 The mirror holds single-file skills only. A catalog entry with kind 'folder'
 (a whole folder that installs from a tar.gz) is skipped: its source is its
 own repository, and its SKILL.md alone is not the skill.
@@ -38,10 +45,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # works under `python3 -I` too
 
-from scan_queue import MAX_RESPONSE_BYTES, USER_AGENT, site_base  # noqa: E402
+from scan_queue import DEFAULT_SITE, MAX_RESPONSE_BYTES, USER_AGENT, site_base  # noqa: E402
 from skillmd import DIGEST_RE, MARKDOWN_MAX_BYTES, is_valid_name, sha256_hex  # noqa: E402
 
 CATALOG_PATH = "/api/skills/catalog"
+NOTE_NAME = "README.md"
 HTTP_TIMEOUT_SECONDS = 60
 MIN_FREE_REMOVALS = 5
 
@@ -113,6 +121,22 @@ def expected_skills(payload: object) -> dict[tuple[str, str], str]:
     return wanted
 
 
+def install_note(base: str, publisher: str, name: str) -> str:
+    """The README.md beside a mirrored SKILL.md: how to install the skill from amdahl.ai."""
+    site = "" if base == DEFAULT_SITE else f" --site {base}"
+    page = f"{base}/skills/{publisher}/{name}"
+    return (
+        f"# {name}\n\n"
+        f"Install this skill from amdahl.ai, whichever way suits you:\n\n"
+        f"- **Ask your agent.** Open {page} and hand your agent the prompt there.\n"
+        f"- **Download the file.** Save {page}.md as `SKILL.md` in a folder named `{name}`,\n"
+        f"  in your agent's skills folder (`~/.claude/skills/` for Claude Code).\n"
+        f"- **Use a terminal.** Run `npx amdahl skills add {publisher}/{name}{site}`.\n\n"
+        f"This folder is a copy of the skill, kept by the hourly mirror. `SKILL.md` has the same bytes\n"
+        f"amdahl.ai serves. The mirror writes this README; it is not part of the skill.\n"
+    )
+
+
 def _remove(path: Path) -> None:
     """Delete a file, symlink or real directory without following links."""
     if path.is_symlink() or not path.is_dir():
@@ -146,8 +170,11 @@ def check_guards(existing: set, wanted: dict, allow_mass_removal: bool) -> None:
         raise MirrorError(f"this run would remove {removals} of {len(existing)} skills (limit {limit}); refusing")
 
 
-def sync(root: Path, wanted: dict[tuple[str, str], str]) -> dict[str, list[str]]:
-    """Make root hold exactly `wanted`. Returns the paths added, updated and removed."""
+def sync(root: Path, wanted: dict[tuple[str, str], str], base: str = DEFAULT_SITE) -> dict[str, list[str]]:
+    """Make root hold exactly `wanted`, each SKILL.md with its install note. Returns the paths added, updated and removed.
+
+    A folder whose SKILL.md is unchanged but whose note was missing or out of date counts as updated.
+    """
     changes: dict[str, list[str]] = {"added": [], "updated": [], "removed": []}
     if root.is_symlink() or (root.exists() and not root.is_dir()):
         _remove(root)
@@ -166,23 +193,34 @@ def sync(root: Path, wanted: dict[tuple[str, str], str]) -> dict[str, list[str]]
                 changes["removed"].append(f"{root.name}/{entry.name}/{skill.name}")
                 continue
             for inner in os.scandir(skill.path):
-                if inner.name != "SKILL.md" or not inner.is_file(follow_symlinks=False):
+                if inner.name not in ("SKILL.md", NOTE_NAME) or not inner.is_file(follow_symlinks=False):
                     _remove(Path(inner.path))
 
     for (publisher, name), markdown in sorted(wanted.items()):
         folder = root / publisher / name
         folder.mkdir(parents=True, exist_ok=True)
-        target = folder / "SKILL.md"
-        data = markdown.encode("utf-8")
         relative = f"{root.name}/{publisher}/{name}"
-        if target.is_file() and not target.is_symlink():
-            if target.read_bytes() == data:
-                continue
-            changes["updated"].append(relative)
-        else:
+        target = folder / "SKILL.md"
+        note = folder / NOTE_NAME
+        existed = target.is_file() and not target.is_symlink()
+        wrote_skill = _write_if_changed(target, markdown.encode("utf-8"))
+        wrote_note = _write_if_changed(note, install_note(base, publisher, name).encode("utf-8"))
+        if not existed:
             changes["added"].append(relative)
-        target.write_bytes(data)
+        elif wrote_skill or wrote_note:
+            changes["updated"].append(relative)
     return changes
+
+
+def _write_if_changed(path: Path, data: bytes) -> bool:
+    """Write `data` to `path` unless it already holds exactly that. True when it wrote.
+
+    sync() has already removed any link in the folder, so this never writes through one.
+    """
+    if path.is_file() and not path.is_symlink() and path.read_bytes() == data:
+        return False
+    path.write_bytes(data)
+    return True
 
 
 def _append(env_var: str, text: str) -> None:
@@ -204,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as error:  # noqa: BLE001 - one clear line, never a partial write
         print(f"Error: {error}", file=sys.stderr)
         return 1
-    changes = sync(args.root, wanted)
+    changes = sync(args.root, wanted, base)
     for kind in ("added", "updated", "removed"):
         for path in changes[kind]:
             print(f"{kind}: {path}")

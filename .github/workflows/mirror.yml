@@ -1,5 +1,6 @@
 # Mirrors every published skill from amdahl.ai into skills/<publisher>/<name>/SKILL.md:
 # a public copy of the catalog whose git history records every published version.
+# Beside each SKILL.md the mirror writes a README.md with the ways to install the skill.
 #
 # amdahl.ai is the source of truth: after a run, skills/ holds exactly the
 # catalog. The script refuses to empty the mirror or remove more than half of
