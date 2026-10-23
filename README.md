@@ -13,7 +13,7 @@ Install from [amdahl.ai/skills](https://amdahl.ai/skills). Each skill's page giv
 
 For a single-file skill, the command saves its `SKILL.md` as `<name>/SKILL.md` in that skills folder. For a folder skill, the command downloads the whole folder from amdahl.ai as one `.tar.gz` file and unpacks it into `<name>/` there. Either way, it checks the download against the checksum amdahl.ai lists, and writes nothing if the check fails. Do not save only the `SKILL.md` of a folder skill: the skill cannot run without its other files.
 
-For each single-file skill, the file in `skills/` here has the same bytes the site serves.
+For each single-file skill, the file in `skills/` here has the same bytes the site serves. Install it with the command above, not by copying the folder: the folder also holds a `README.md` that the mirror writes, which is not part of the skill.
 
 ## Submit a skill
 
@@ -48,7 +48,7 @@ The checks are evidence, not a verdict. In June 2026, [Trail of Bits](https://bl
 amdahl.ai is the source of truth for the catalog. This repo does three jobs on GitHub's free runners.
 
 1. **Security scans.** Every 10 minutes, [`scan-queue.yml`](.github/workflows/scan-queue.yml) pulls skills that wait for a scan from amdahl.ai. It runs the three scanners on each one and posts the results back.
-2. **Public mirror.** Every hour, [`mirror.yml`](.github/workflows/mirror.yml) writes each published skill to `skills/<publisher>/<name>/SKILL.md`. It also removes skills that are no longer published. The git history is a public record of every published version. The mirror does not copy a folder skill (a skill that installs from a tar.gz, such as system-diagram), because its source is its own repository.
+2. **Public mirror.** Every hour, [`mirror.yml`](.github/workflows/mirror.yml) writes each published skill to `skills/<publisher>/<name>/SKILL.md`, with a `README.md` beside it that gives the skill's install command and its page on amdahl.ai. It also removes skills that are no longer published. The git history is a public record of every published version. The mirror does not copy a folder skill (a skill that installs from a tar.gz, such as system-diagram), because its source is its own repository.
 3. **Keepalive.** On the 1st and the 15th of each month, [`keepalive.yml`](.github/workflows/keepalive.yml) commits the time to `.github/keepalive`. GitHub turns off scheduled workflows in a public repository after 60 days with no activity, and the mirror commits only when the catalog changes.
 
 ## Layout
@@ -70,7 +70,7 @@ scripts/
   scan_queue.py         queue client for amdahl.ai
   mirror.py             catalog mirror
   skillmd.py            name, id, digest and size rules
-skills/                 published skills (written by the mirror)
+skills/                 published skills and their install notes (written by the mirror)
 tests/                  unit tests, with real scanner output as fixtures
 ```
 

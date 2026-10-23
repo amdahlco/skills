@@ -129,10 +129,66 @@ class Sync(unittest.TestCase):
 
         mirror.sync(self.root, wanted)
         self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["amdahl"])
-        self.assertEqual(sorted(p.name for p in skill_file.parent.iterdir()), ["SKILL.md"])
+        self.assertEqual(sorted(p.name for p in skill_file.parent.iterdir()), ["README.md", "SKILL.md"])
         self.assertFalse(skill_file.is_symlink())
         self.assertEqual(skill_file.read_text(), CLEAN)
         self.assertEqual((outside / "keep.txt").read_text(), "must survive")
+
+
+class InstallNote(unittest.TestCase):
+    """Each mirrored folder says how to install the skill from amdahl.ai, where installs are counted."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "skills"
+        self.wanted = {("amdahl", "discovery-call-notes"): CLEAN}
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def note(self) -> Path:
+        return self.root / "amdahl" / "discovery-call-notes" / "README.md"
+
+    def test_gives_the_amdahl_command_and_page(self) -> None:
+        mirror.sync(self.root, self.wanted)
+        text = self.note().read_text(encoding="utf-8")
+        self.assertIn("npx amdahl skills add amdahl/discovery-call-notes\n", text)
+        self.assertIn("https://amdahl.ai/skills/amdahl/discovery-call-notes", text)
+        self.assertNotIn("--site", text)
+        self.assertNotIn("npx skills", text)
+        self.assertTrue(text.isascii())
+
+    def test_names_another_site(self) -> None:
+        mirror.sync(self.root, self.wanted, "http://localhost:6777")
+        text = self.note().read_text(encoding="utf-8")
+        self.assertIn("npx amdahl skills add amdahl/discovery-call-notes --site http://localhost:6777\n", text)
+        self.assertIn("http://localhost:6777/skills/amdahl/discovery-call-notes", text)
+
+    def test_skill_md_keeps_the_served_bytes(self) -> None:
+        mirror.sync(self.root, self.wanted)
+        skill = self.root / "amdahl" / "discovery-call-notes" / "SKILL.md"
+        self.assertEqual(skill.read_bytes(), CLEAN.encode("utf-8"))
+
+    def test_a_missing_or_edited_note_is_written_back(self) -> None:
+        mirror.sync(self.root, self.wanted)
+        expected = self.note().read_bytes()
+        self.note().write_text("edited by hand")
+        self.assertEqual(mirror.sync(self.root, self.wanted)["updated"], ["skills/amdahl/discovery-call-notes"])
+        self.assertEqual(self.note().read_bytes(), expected)
+        self.note().unlink()
+        self.assertEqual(mirror.sync(self.root, self.wanted)["updated"], ["skills/amdahl/discovery-call-notes"])
+        self.assertEqual(mirror.sync(self.root, self.wanted), {"added": [], "updated": [], "removed": []})
+
+    def test_a_linked_note_is_replaced_without_following_it(self) -> None:
+        outside = Path(self.tmp.name) / "outside.txt"
+        outside.write_text("must survive")
+        mirror.sync(self.root, self.wanted)
+        self.note().unlink()
+        self.note().symlink_to(outside)
+        mirror.sync(self.root, self.wanted)
+        self.assertFalse(self.note().is_symlink())
+        self.assertIn("npx amdahl skills add", self.note().read_text(encoding="utf-8"))
+        self.assertEqual(outside.read_text(), "must survive")
 
 
 class Guards(unittest.TestCase):
