@@ -84,6 +84,34 @@ class SkillSpector(Shape):
         report["risk_assessment"]["severity"] = "LOW"
         self.assertEqual(normalize.normalize_skillspector(report, DAY)["result"], "warn")
 
+    def test_missing_referenced_files_alone_pass(self) -> None:
+        # Benchmark, 2026-10-23: 78 of 90 public skills scanned as the SKILL.md alone were
+        # partial for this reason only, with no findings.
+        report = fixture("skillspector", "partial.json")
+        report["issues"] = []
+        report["risk_assessment"]["severity"] = "LOW"
+        report["analysis_completeness"]["ledger_exceptions"] = [
+            {"outcome": "partial", "phase": "reference_resolution", "reason_code": "reference_missing"}]
+        check = normalize.normalize_skillspector(report, DAY)
+        self.assertEqual(check["result"], "pass")
+        self.assertEqual(check["summary"], "Referenced files not included. No findings")
+
+    def test_missing_referenced_files_never_hide_a_finding(self) -> None:
+        report = fixture("skillspector", "partial.json")
+        report["analysis_completeness"]["ledger_exceptions"] = [
+            {"outcome": "partial", "phase": "reference_resolution", "reason_code": "reference_missing"}]
+        self.assertEqual(normalize.normalize_skillspector(report, DAY)["result"], "fail")
+
+    def test_any_other_gap_still_warns(self) -> None:
+        for codes in (["obfuscated_instruction_text"], ["reference_missing", "static_parse_limit"], ["something_new"], []):
+            report = fixture("skillspector", "partial.json")
+            report["issues"] = []
+            report["risk_assessment"]["severity"] = "LOW"
+            report["analysis_completeness"]["ledger_exceptions"] = [{"reason_code": c} for c in codes]
+            check = normalize.normalize_skillspector(report, DAY)
+            self.assertEqual(check["result"], "warn", codes)
+            self.assertTrue(check["summary"].startswith("Partial coverage."), codes)
+
     def test_score_band_can_raise_the_result(self) -> None:
         report = fixture("skillspector", "clean.json")
         report["issues"] = [{"id": "E1", "pattern": "External Transmission", "severity": "MEDIUM"}] * 6
@@ -123,6 +151,15 @@ class Cisco(Shape):
         check = normalize.normalize_cisco(fixture("cisco", "fallback.json"), DAY)
         self.assertEqual(check["result"], "fail")
         self.assertIn("highest CRITICAL", check["summary"])
+
+    def test_no_findings_reported_as_safe_passes(self) -> None:
+        # Real output for a clean skill with no findings at all: max_severity "SAFE".
+        report = fixture("cisco", "clean.json")
+        report["findings"] = []
+        report["max_severity"] = "SAFE"
+        report["is_safe"] = True
+        check = normalize.normalize_cisco(report, DAY)
+        self.assertEqual((check["result"], check["summary"]), ("pass", "No findings"))
 
     def test_medium_warns(self) -> None:
         report = fixture("cisco", "clean.json")

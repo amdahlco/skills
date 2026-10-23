@@ -26,7 +26,15 @@ DID_NOT_FINISH = "Scanner did not finish"
 SUMMARY_MAX = 300
 DETAILS_MAX = 4000
 
-SEVERITY_RANK = {"NONE": 0, "INFO": 1, "LOW": 2, "MEDIUM": 3, "HIGH": 4, "CRITICAL": 5}
+# Cisco skill-scanner reports a skill with no findings as max_severity "SAFE" (is_safe true).
+# It ranks with NONE: without it, every clean skill graded as an unknown severity, a warning.
+SEVERITY_RANK = {"NONE": 0, "SAFE": 0, "INFO": 1, "LOW": 2, "MEDIUM": 3, "HIGH": 4, "CRITICAL": 5}
+
+# SkillSpector marks a scan partial when a SKILL.md names a file it cannot read. A submission
+# is the SKILL.md alone, so a missing referenced file is expected and is not a warning on its
+# own; the summary still says so. Any other gap (a front matter it cannot parse, a file too
+# large to parse, obfuscated text, excluded executables, a reason we do not know) still warns.
+EXPECTED_SKILLSPECTOR_GAPS = frozenset({"reference_missing"})
 RESULT_RANK = {"pass": 0, "warn": 1, "fail": 2}
 
 
@@ -141,7 +149,12 @@ def normalize_skillspector(report: Any, checked_at: str) -> dict[str, str]:
 
     completeness = report.get("analysis_completeness") or {}
     partial = isinstance(completeness, dict) and completeness.get("is_complete") is False
+    gaps = set()
     if partial:
+        for exception in completeness.get("ledger_exceptions") or []:
+            gaps.add(str(exception.get("reason_code")) if isinstance(exception, dict) else "?")
+    expected_gaps_only = bool(gaps) and gaps <= EXPECTED_SKILLSPECTOR_GAPS
+    if partial and not expected_gaps_only:
         result = worst_result([result, "warn"])
 
     if rows:
@@ -149,7 +162,7 @@ def normalize_skillspector(report: Any, checked_at: str) -> dict[str, str]:
     else:
         summary = "No findings"
     if partial:
-        summary = "Partial coverage. " + summary
+        summary = ("Referenced files not included. " if expected_gaps_only else "Partial coverage. ") + summary
     head = (
         f"Risk score {risk.get('score', '?')}/100, {risk.get('severity', '?')}, "
         f"{risk.get('recommendation', '?')}. Rules only, no model."
