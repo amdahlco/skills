@@ -1,0 +1,22 @@
+# Keeps pinned actions and the hash-locked scanner lists current. A release must be at least
+# 7 days old before Dependabot proposes it.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: pip
+    directory: /scanners
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      scanners:
+        patterns: ["*"]
