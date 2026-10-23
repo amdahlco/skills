@@ -1,0 +1,67 @@
+# Keeps the scheduled workflows on. GitHub turns off every scheduled workflow
+# in a public repository after 60 days with no repository activity, and the
+# mirror commits only when the catalog changes. If the scan schedule stops,
+# no submitted skill can be approved on amdahl.ai: Approve waits for the scans.
+#
+# Twice a month (the 1st and the 15th, so one failed run is not fatal) this job writes the time to .github/keepalive and pushes that
+# one file to main. main is protected, so it pushes with the same GitHub App
+# token as mirror.yml (the setup is in the note at the top of mirror.yml).
+#
+# If a run fails, fix it and run it by hand (Run workflow) within 60 days of
+# the last commit on main. After that GitHub turns off every schedule here,
+# this one too, and a person must turn each one back on in the Actions tab.
+# GitHub emails a failed scheduled run to the person who last changed the
+# cron line below.
+name: Keepalive
+
+on:
+  schedule:
+    - cron: "41 6 1,15 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    name: Commit the keepalive file
+    if: github.repository == 'amdahlco/skills' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Mint the bot token
+        id: app-token
+        if: vars.SKILLS_BOT_CLIENT_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SKILLS_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.SKILLS_BOT_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ steps.app-token.outputs.token || github.token }}
+
+      - name: Commit and push
+        timeout-minutes: 3
+        env:
+          GIT_AUTHOR_NAME: amdahl-skills-bot
+          GIT_COMMITTER_NAME: amdahl-skills-bot
+          GIT_AUTHOR_EMAIL: ${{ vars.SKILLS_BOT_EMAIL || 'amdahl-skills-bot@users.noreply.github.com' }}
+          GIT_COMMITTER_EMAIL: ${{ vars.SKILLS_BOT_EMAIL || 'amdahl-skills-bot@users.noreply.github.com' }}
+        run: |
+          date -u +%Y-%m-%dT%H:%M:%SZ > .github/keepalive
+          git add -- .github/keepalive
+          git commit --quiet \
+            -m "chore(keepalive): keep the scheduled workflows on" \
+            -m "GitHub turns off scheduled workflows in a public repository after 60 days with no activity."
+          if ! git push origin "HEAD:${GITHUB_REF_NAME}"; then
+            # The mirror can push first. It never writes this file, so the rebase is clean.
+            git pull --rebase --quiet origin "${GITHUB_REF_NAME}"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi

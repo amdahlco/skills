@@ -1,0 +1,87 @@
+# Mirrors every published skill from amdahl.ai into skills/<publisher>/<name>/SKILL.md:
+# a public copy of the catalog whose git history records every published version.
+#
+# amdahl.ai is the source of truth: after a run, skills/ holds exactly the
+# catalog. The script refuses to empty the mirror or remove more than half of
+# it in one run unless a person starts the run with allow_mass_removal.
+#
+# Pushing to a protected main: GITHUB_TOKEN cannot be added to a ruleset's
+# bypass list. Create a GitHub App (contents: write on this repo only), add it
+# as a bypass actor, and set vars.SKILLS_BOT_CLIENT_ID plus
+# secrets.SKILLS_BOT_PRIVATE_KEY. Without them the job pushes with GITHUB_TOKEN.
+name: Mirror catalog
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      allow_mass_removal:
+        description: Allow this run to remove more than half of the skills, or all of them
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: Sync skills/ with the catalog
+    if: github.repository == 'amdahlco/skills' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      AMDAHL_SITE: ${{ vars.AMDAHL_SITE || 'https://amdahl.ai' }}
+    steps:
+      - name: Mint the bot token
+        id: app-token
+        if: vars.SKILLS_BOT_CLIENT_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SKILLS_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.SKILLS_BOT_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ steps.app-token.outputs.token || github.token }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Sync skills/ with the catalog
+        id: sync
+        timeout-minutes: 5
+        env:
+          ALLOW_MASS_REMOVAL: ${{ inputs.allow_mass_removal }}
+        run: |
+          args=(--root skills)
+          if [ "$ALLOW_MASS_REMOVAL" = "true" ]; then
+            args+=(--allow-mass-removal)
+          fi
+          python3 -I scripts/mirror.py "${args[@]}"
+
+      - name: Commit and push
+        timeout-minutes: 3
+        env:
+          ADDED: ${{ steps.sync.outputs.added }}
+          UPDATED: ${{ steps.sync.outputs.updated }}
+          REMOVED: ${{ steps.sync.outputs.removed }}
+          BOT_EMAIL: ${{ vars.SKILLS_BOT_EMAIL || 'amdahl-skills-bot@users.noreply.github.com' }}
+        run: |
+          git add -A -- skills
+          if git diff --cached --quiet; then
+            echo "No changes"
+            exit 0
+          fi
+          git -c user.name=amdahl-skills-bot -c user.email="$BOT_EMAIL" commit --quiet \
+            -m "chore(mirror): sync skills from amdahl.ai" \
+            -m "Added ${ADDED:-0}, updated ${UPDATED:-0}, removed ${REMOVED:-0}."
+          git push origin "HEAD:${GITHUB_REF_NAME}"

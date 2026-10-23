@@ -1,0 +1,85 @@
+{
+  "skill": {
+    "name": "unknown",
+    "source": "/tmp/skill-scan-in-example/broken-front",
+    "scanned_at": "2026-10-22T22:46:04.535169+00:00"
+  },
+  "risk_assessment": {
+    "score": 20,
+    "severity": "LOW",
+    "recommendation": "CAUTION",
+    "max_issue_severity": "HIGH"
+  },
+  "components": [
+    {
+      "path": "SKILL.md",
+      "type": "markdown",
+      "lines": 6,
+      "executable": false,
+      "size_bytes": 85,
+      "source_url": null,
+      "source_identity": null,
+      "source_digest": null
+    }
+  ],
+  "issues": [
+    {
+      "id": "P1",
+      "category": "Prompt Injection",
+      "pattern": "Instruction Override",
+      "severity": "HIGH",
+      "confidence": 0.8,
+      "location": {
+        "file": "SKILL.md",
+        "start_line": 6,
+        "end_line": 6,
+        "start_column": 0,
+        "end_column": 32
+      },
+      "finding": "Ignore all previous instructions",
+      "explanation": "This pattern attempts to override system instructions or ignore safety constraints. Without LLM analysis, manual review is recommended.",
+      "tags": [
+        "Prompt Injection"
+      ]
+    }
+  ],
+  "suppressed_count": 0,
+  "metadata": {
+    "has_executable_scripts": false,
+    "skillspector_version": "2.13.0",
+    "llm_requested": false,
+    "llm_available": false,
+    "inference_usage": []
+  },
+  "execution_successful": true,
+  "analysis_completeness": {
+    "total_components": 1,
+    "scanned_components": 0,
+    "coverage_percent": 0.0,
+    "is_complete": false,
+    "status": "partial",
+    "execution_successful": true,
+    "fully_inspected_files": 0,
+    "partially_inspected_files": 1,
+    "entirely_uninspected_files": 0,
+    "ledger_exceptions": [
+      {
+        "outcome": "partial",
+        "phase": "manifest",
+        "reason_code": "manifest_parse_error",
+        "message": "Manifest frontmatter is malformed or uses an unsupported value shape.",
+        "path": "SKILL.md",
+        "start_line": null,
+        "end_line": null,
+        "fatal": false,
+        "error_class": "ParserError"
+      }
+    ],
+    "scope_exclusions": [],
+    "references": [],
+    "limitations": [],
+    "findings_before_filtering": 1,
+    "findings_after_filtering": 1
+  },
+  "_trimmed": "Real SkillSpector 2.13.0 output (--no-llm --format json), trimmed: code_snippet, llm_provenance and analyzer_statuses removed, paths replaced."
+}

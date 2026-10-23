@@ -1,0 +1,47 @@
+# Proves the scan path works on GitHub's own runners, with no secrets: the
+# unit tests, then the three pinned scanners installed exactly as the queue
+# installs them, run on a clean skill, a skill with hidden instructions and
+# a skill with a secret (made at run time), each checked against the verdict
+# it must get (scripts/self_test.py). Runs on every push and pull request,
+# and by hand.
+name: Self-test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: self-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  self-test:
+    name: Scanners give the right verdicts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -t tests
+
+      - name: Install the scanners
+        timeout-minutes: 10
+        run: bash scripts/install_scanners.sh
+
+      - name: Scan the samples
+        timeout-minutes: 8
+        run: python3 -I scripts/self_test.py

@@ -1,0 +1,37 @@
+{
+  "skill_name": "discovery-call-notes",
+  "skill_path": "/tmp/skill-scan-in-example/discovery-call-notes",
+  "is_safe": true,
+  "max_severity": "INFO",
+  "findings_count": 1,
+  "analyzers_used": [
+    "static_analyzer",
+    "bytecode",
+    "pipeline",
+    "correlation",
+    "behavioral_analyzer"
+  ],
+  "findings": [
+    {
+      "id": "MANIFEST_MISSING_LICENSE_c5ae9be793",
+      "rule_id": "MANIFEST_MISSING_LICENSE",
+      "category": "policy_violation",
+      "severity": "INFO",
+      "title": "Skill does not specify a license",
+      "description": "Skill manifest does not include a 'license' field. Specifying a license helps users understand usage terms.",
+      "file_path": "SKILL.md",
+      "line_number": null,
+      "snippet": null,
+      "analyzer": "static",
+      "metadata": {
+        "aitech": null,
+        "aisubtech": null
+      }
+    }
+  ],
+  "scan_metadata": {
+    "policy_name": "default",
+    "policy_preset_base": "balanced"
+  },
+  "_trimmed": "Real cisco-ai-skill-scanner 2.3.1 output (scan --use-behavioral --policy balanced --format json), trimmed: most metadata removed, paths replaced."
+}

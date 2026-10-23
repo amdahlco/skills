@@ -1,0 +1,53 @@
+{
+  "skill": {
+    "name": "discovery-call-notes",
+    "source": "/tmp/skill-scan-in-example/discovery-call-notes",
+    "scanned_at": "2026-10-22T22:44:39.413346+00:00"
+  },
+  "risk_assessment": {
+    "score": 0,
+    "severity": "LOW",
+    "recommendation": "SAFE",
+    "max_issue_severity": "NONE"
+  },
+  "components": [
+    {
+      "path": "SKILL.md",
+      "type": "markdown",
+      "lines": 23,
+      "executable": false,
+      "size_bytes": 924,
+      "source_url": null,
+      "source_identity": null,
+      "source_digest": null
+    }
+  ],
+  "issues": [],
+  "suppressed_count": 0,
+  "metadata": {
+    "has_executable_scripts": false,
+    "skillspector_version": "2.13.0",
+    "llm_requested": false,
+    "llm_available": false,
+    "inference_usage": []
+  },
+  "execution_successful": true,
+  "analysis_completeness": {
+    "total_components": 1,
+    "scanned_components": 1,
+    "coverage_percent": 100.0,
+    "is_complete": true,
+    "status": "complete",
+    "execution_successful": true,
+    "fully_inspected_files": 1,
+    "partially_inspected_files": 0,
+    "entirely_uninspected_files": 0,
+    "ledger_exceptions": [],
+    "scope_exclusions": [],
+    "references": [],
+    "limitations": [],
+    "findings_before_filtering": 0,
+    "findings_after_filtering": 0
+  },
+  "_trimmed": "Real SkillSpector 2.13.0 output (--no-llm --format json), trimmed: code_snippet, llm_provenance and analyzer_statuses removed, paths replaced."
+}

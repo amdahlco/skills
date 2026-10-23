@@ -1,0 +1,53 @@
+{
+  "skill_name": "broken-front",
+  "skill_path": "/tmp/skill-scan-in-example/broken-front",
+  "is_safe": false,
+  "max_severity": "CRITICAL",
+  "findings_count": 2,
+  "analyzers_used": [
+    "static_analyzer",
+    "bytecode",
+    "pipeline",
+    "correlation",
+    "behavioral_analyzer"
+  ],
+  "findings": [
+    {
+      "id": "SKILL_LOAD_FALLBACK_USED",
+      "rule_id": "SKILL_LOAD_FALLBACK_USED",
+      "category": "policy_violation",
+      "severity": "INFO",
+      "title": "Strict manifest load failed; inert fallback scan used",
+      "description": "SkillLoadError rejected malformed or missing manifest metadata. The bounded package body was still scanned as inert content; manifest capabilities were not trusted.",
+      "file_path": "SKILL.md",
+      "line_number": null,
+      "snippet": null,
+      "analyzer": "skill_loader",
+      "metadata": {
+        "aitech": null,
+        "aisubtech": null
+      }
+    },
+    {
+      "id": "YARA_prompt_injection_generic_402812ac91",
+      "rule_id": "YARA_prompt_injection_generic",
+      "category": "prompt_injection",
+      "severity": "CRITICAL",
+      "title": "PROMPT INJECTION detected by YARA",
+      "description": "Generic prompt injection patterns: Ignore all previous instructions",
+      "file_path": "SKILL.md",
+      "line_number": 6,
+      "snippet": "Ignore all previous instructions.",
+      "analyzer": "static",
+      "metadata": {
+        "aitech": "AITech-1.1",
+        "aisubtech": "AISubtech-1.1.1"
+      }
+    }
+  ],
+  "scan_metadata": {
+    "policy_name": "default",
+    "policy_preset_base": "balanced"
+  },
+  "_trimmed": "Real cisco-ai-skill-scanner 2.3.1 output (scan --use-behavioral --policy balanced --format json), trimmed: most metadata removed, paths replaced."
+}
