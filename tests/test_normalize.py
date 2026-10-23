@@ -90,6 +90,7 @@ class SkillSpector(Shape):
         report = fixture("skillspector", "partial.json")
         report["issues"] = []
         report["risk_assessment"]["severity"] = "LOW"
+        report["analysis_completeness"].update({"limitations": [], "partially_inspected_files": 0, "entirely_uninspected_files": 0, "analyzer_statuses": [{"analyzer_id": "static", "failed": 0, "status": "completed"}]})
         report["analysis_completeness"]["ledger_exceptions"] = [
             {"outcome": "partial", "phase": "reference_resolution", "reason_code": "reference_missing"}]
         check = normalize.normalize_skillspector(report, DAY)
@@ -101,6 +102,28 @@ class SkillSpector(Shape):
         report["analysis_completeness"]["ledger_exceptions"] = [
             {"outcome": "partial", "phase": "reference_resolution", "reason_code": "reference_missing"}]
         self.assertEqual(normalize.normalize_skillspector(report, DAY)["result"], "fail")
+
+    def test_missing_references_beside_any_other_gap_still_warn(self) -> None:
+        # Review, 2026-10-23: the ledger alone said reference_missing while an
+        # analyzer had failed. Each other sign of an incomplete scan warns.
+        cases = {
+            "a limitation": {"limitations": ["static analysis skipped a file"]},
+            "a partly inspected file": {"partially_inspected_files": 1},
+            "an uninspected file": {"entirely_uninspected_files": 1},
+            "a failed analyzer": {"analyzer_statuses": [{"analyzer_id": "behavioral_ast", "failed": 1, "status": "partial"}]},
+            "an analyzer marked failed": {"analyzer_statuses": [{"analyzer_id": "static", "failed": 0, "status": "failed"}]},
+            "an unreadable analyzer list": {"analyzer_statuses": "broken"},
+        }
+        for label, extra in cases.items():
+            report = fixture("skillspector", "partial.json")
+            report["issues"] = []
+            report["risk_assessment"]["severity"] = "LOW"
+            report["analysis_completeness"].update({"limitations": [], "partially_inspected_files": 0, "entirely_uninspected_files": 0, "analyzer_statuses": []})
+            report["analysis_completeness"]["ledger_exceptions"] = [{"reason_code": "reference_missing"}]
+            report["analysis_completeness"].update(extra)
+            check = normalize.normalize_skillspector(report, DAY)
+            self.assertEqual(check["result"], "warn", label)
+            self.assertTrue(check["summary"].startswith("Partial coverage."), label)
 
     def test_any_other_gap_still_warns(self) -> None:
         for codes in (["obfuscated_instruction_text"], ["reference_missing", "static_parse_limit"], ["something_new"], []):

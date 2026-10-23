@@ -110,6 +110,20 @@ def _summary(findings: list[tuple[int, str]], top: str) -> str:
     return f"{_plural(len(findings), 'finding')}, highest {top}: " + "; ".join(titles)
 
 
+def _failed_analyzer(statuses: Any) -> bool:
+    """True when any SkillSpector analyzer failed, or the list cannot be read."""
+    if statuses is None:
+        return False
+    if not isinstance(statuses, list):
+        return True
+    for status in statuses:
+        if not isinstance(status, dict):
+            return True
+        if status.get("failed") or str(status.get("status", "")).lower() == "failed":
+            return True
+    return False
+
+
 def normalize_skillspector(report: Any, checked_at: str) -> dict[str, str]:
     """NVIDIA SkillSpector `scan --format json` report -> one check."""
     try:
@@ -153,7 +167,18 @@ def normalize_skillspector(report: Any, checked_at: str) -> dict[str, str]:
     if partial:
         for exception in completeness.get("ledger_exceptions") or []:
             gaps.add(str(exception.get("reason_code")) if isinstance(exception, dict) else "?")
-    expected_gaps_only = bool(gaps) and gaps <= EXPECTED_SKILLSPECTOR_GAPS
+    # Only a scan that is otherwise whole: nothing listed as a limitation, no
+    # file left partly or wholly uninspected, and no analyzer that failed.
+    # The ledger alone is not enough: a failed analyzer can sit beside a
+    # reference_missing gap (found in review, 2026-10-23).
+    expected_gaps_only = (
+        bool(gaps)
+        and gaps <= EXPECTED_SKILLSPECTOR_GAPS
+        and not completeness.get("limitations")
+        and not completeness.get("partially_inspected_files")
+        and not completeness.get("entirely_uninspected_files")
+        and not _failed_analyzer(completeness.get("analyzer_statuses"))
+    )
     if partial and not expected_gaps_only:
         result = worst_result([result, "warn"])
 
