@@ -12,9 +12,9 @@ removes more than half of them (at least 5 may always go). Pass
 
 Each skill folder also gets a README.md, written by the mirror: three ways to
 install the skill from amdahl.ai (the prompt on its page, its .md file, or
-`npx amdahl skills add <publisher>/<name>`). GitHub shows it to anyone who opens the folder here, so a reader
-who finds a skill on GitHub installs it from amdahl.ai, where the install is
-counted. The note is text only: it calls nothing, and SKILL.md stays the
+`npx amdahl skills add <publisher>/<name>`). GitHub shows it to anyone who
+opens the folder here, so a reader who finds a skill on GitHub installs it
+from amdahl.ai, where the install is counted. The note is text only: it calls nothing, and SKILL.md stays the
 exact bytes the site serves.
 
 The mirror holds single-file skills only. A catalog entry with kind 'folder'
@@ -39,6 +39,7 @@ import os
 import shutil
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import Counter
 from pathlib import Path
@@ -122,18 +123,19 @@ def expected_skills(payload: object) -> dict[tuple[str, str], str]:
 
 
 def install_note(base: str, publisher: str, name: str) -> str:
-    """The README.md beside a mirrored SKILL.md: how to install the skill from amdahl.ai."""
+    """The README.md beside a mirrored SKILL.md: how to install the skill from the site it mirrors."""
     site = "" if base == DEFAULT_SITE else f" --site {base}"
+    host = urllib.parse.urlsplit(base).netloc
     page = f"{base}/skills/{publisher}/{name}"
     return (
         f"# {name}\n\n"
-        f"Install this skill from amdahl.ai, whichever way suits you:\n\n"
+        f"Install this skill from {host}, whichever way suits you:\n\n"
         f"- **Ask your agent.** Open {page} and hand your agent the prompt there.\n"
         f"- **Download the file.** Save {page}.md as `SKILL.md` in a folder named `{name}`,\n"
         f"  in your agent's skills folder (`~/.claude/skills/` for Claude Code).\n"
         f"- **Use a terminal.** Run `npx amdahl skills add {publisher}/{name}{site}`.\n\n"
         f"This folder is a copy of the skill, kept by the hourly mirror. `SKILL.md` has the same bytes\n"
-        f"amdahl.ai serves. The mirror writes this README; it is not part of the skill.\n"
+        f"{host} serves. The mirror writes this README; it is not part of the skill.\n"
     )
 
 

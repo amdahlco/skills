@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import io
+import os
 import tempfile
 import unittest
+from unittest import mock
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -165,8 +167,23 @@ class InstallNote(unittest.TestCase):
     def test_names_another_site(self) -> None:
         mirror.sync(self.root, self.wanted, "http://localhost:6777")
         text = self.note().read_text(encoding="utf-8")
+        self.assertIn("Install this skill from localhost:6777,", text)
         self.assertIn("`npx amdahl skills add amdahl/discovery-call-notes --site http://localhost:6777`", text)
         self.assertIn("Save http://localhost:6777/skills/amdahl/discovery-call-notes.md", text)
+        self.assertIn("the same bytes\nlocalhost:6777 serves.", text)
+        self.assertNotIn("amdahl.ai", text)
+
+    def test_a_run_writes_the_site_it_read(self) -> None:
+        # main() must hand AMDAHL_SITE to sync(), or a staging run would write production links.
+        catalog = {"skills": [entry()]}
+        with mock.patch.dict(os.environ, {"AMDAHL_SITE": "http://localhost:6777"}, clear=False), \
+                mock.patch.object(mirror, "fetch_catalog", return_value=catalog) as fetch, \
+                redirect_stdout(io.StringIO()):
+            os.environ.pop("GITHUB_OUTPUT", None)
+            os.environ.pop("GITHUB_STEP_SUMMARY", None)
+            self.assertEqual(mirror.main(["--root", str(self.root)]), 0)
+        fetch.assert_called_once_with("http://localhost:6777")
+        self.assertIn("--site http://localhost:6777`", self.note().read_text(encoding="utf-8"))
 
     def test_skill_md_keeps_the_served_bytes(self) -> None:
         mirror.sync(self.root, self.wanted)
