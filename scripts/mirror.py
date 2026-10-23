@@ -10,9 +10,9 @@ mirror: an empty catalog never removes existing skills, and one run never
 removes more than half of them (at least 5 may always go). Pass
 --allow-mass-removal to override both.
 
-Each skill folder also gets a README.md, written by the mirror: the skill's
-install command (`npx amdahl skills add <publisher>/<name>`) and its page on
-amdahl.ai. GitHub shows it to anyone who opens the folder here, so a reader
+Each skill folder also gets a README.md, written by the mirror: three ways to
+install the skill from amdahl.ai (the prompt on its page, its .md file, or
+`npx amdahl skills add <publisher>/<name>`). GitHub shows it to anyone who opens the folder here, so a reader
 who finds a skill on GitHub installs it from amdahl.ai, where the install is
 counted. The note is text only: it calls nothing, and SKILL.md stays the
 exact bytes the site serves.
@@ -124,13 +124,14 @@ def expected_skills(payload: object) -> dict[tuple[str, str], str]:
 def install_note(base: str, publisher: str, name: str) -> str:
     """The README.md beside a mirrored SKILL.md: how to install the skill from amdahl.ai."""
     site = "" if base == DEFAULT_SITE else f" --site {base}"
+    page = f"{base}/skills/{publisher}/{name}"
     return (
         f"# {name}\n\n"
-        f"Install this skill from amdahl.ai:\n\n"
-        f"```bash\n"
-        f"npx amdahl skills add {publisher}/{name}{site}\n"
-        f"```\n\n"
-        f"Its page: {base}/skills/{publisher}/{name}\n\n"
+        f"Install this skill from amdahl.ai, whichever way suits you:\n\n"
+        f"- **Ask your agent.** Open {page} and hand your agent the prompt there.\n"
+        f"- **Download the file.** Save {page}.md as `SKILL.md` in a folder named `{name}`,\n"
+        f"  in your agent's skills folder (`~/.claude/skills/` for Claude Code).\n"
+        f"- **Use a terminal.** Run `npx amdahl skills add {publisher}/{name}{site}`.\n\n"
         f"This folder is a copy of the skill, kept by the hourly mirror. `SKILL.md` has the same bytes\n"
         f"amdahl.ai serves. The mirror writes this README; it is not part of the skill.\n"
     )

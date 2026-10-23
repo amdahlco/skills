@@ -149,11 +149,15 @@ class InstallNote(unittest.TestCase):
     def note(self) -> Path:
         return self.root / "amdahl" / "discovery-call-notes" / "README.md"
 
-    def test_gives_the_amdahl_command_and_page(self) -> None:
+    def test_gives_three_ways_all_from_amdahl_ai(self) -> None:
+        # A reader without a terminal gets the page's prompt or the file itself; every way
+        # fetches from amdahl.ai, where the install is counted.
         mirror.sync(self.root, self.wanted)
         text = self.note().read_text(encoding="utf-8")
-        self.assertIn("npx amdahl skills add amdahl/discovery-call-notes\n", text)
-        self.assertIn("https://amdahl.ai/skills/amdahl/discovery-call-notes", text)
+        self.assertIn("Open https://amdahl.ai/skills/amdahl/discovery-call-notes and hand your agent", text)
+        self.assertIn("Save https://amdahl.ai/skills/amdahl/discovery-call-notes.md as `SKILL.md`", text)
+        self.assertIn("`npx amdahl skills add amdahl/discovery-call-notes`", text)
+        self.assertNotIn("github.com", text)
         self.assertNotIn("--site", text)
         self.assertNotIn("npx skills", text)
         self.assertTrue(text.isascii())
@@ -161,8 +165,8 @@ class InstallNote(unittest.TestCase):
     def test_names_another_site(self) -> None:
         mirror.sync(self.root, self.wanted, "http://localhost:6777")
         text = self.note().read_text(encoding="utf-8")
-        self.assertIn("npx amdahl skills add amdahl/discovery-call-notes --site http://localhost:6777\n", text)
-        self.assertIn("http://localhost:6777/skills/amdahl/discovery-call-notes", text)
+        self.assertIn("`npx amdahl skills add amdahl/discovery-call-notes --site http://localhost:6777`", text)
+        self.assertIn("Save http://localhost:6777/skills/amdahl/discovery-call-notes.md", text)
 
     def test_skill_md_keeps_the_served_bytes(self) -> None:
         mirror.sync(self.root, self.wanted)
