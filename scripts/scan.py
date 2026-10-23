@@ -1,12 +1,19 @@
-"""Run the three scanners on one skill folder and print the normalized checks.
+"""Run the three checks on one skill folder and print them as normalized checks.
 
 Usage:
     python3 scripts/scan.py <skill-folder> [--output checks.json]
 
-The scanners READ the files. Nothing in the skill is executed. Each scanner
-runs with a scrubbed environment (no tokens, no model keys), a private HOME
-and a timeout. Scanner binaries come from SKILLSPECTOR_BIN, SKILL_SCANNER_BIN
-and BETTERLEAKS_BIN, or from PATH.
+The checks READ the files. Nothing in the skill is executed. The two scanners
+run with a scrubbed environment (no tokens, no model keys), a private HOME
+and a timeout. Scanner binaries come from SKILL_SCANNER_BIN and
+BETTERLEAKS_BIN, or from PATH. After them, the AI security review
+(ai_review.py) sends the SKILL.md text, and nothing else, to the Anthropic API.
+It needs ANTHROPIC_API_KEY; without it, that check did not finish.
+
+The scan queue runs the two halves in separate steps (scan_queue.py): the
+scanners as an unprivileged user with no secrets (`scanner_checks`), and the
+AI review in a step that holds only the model key (`review_markdown`). This
+command runs both in one process, for local use.
 
 Standard library only.
 """
@@ -23,13 +30,16 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # works under `python3 -I` too
 
+import ai_review  # noqa: E402
 import normalize  # noqa: E402
 from skillmd import MARKDOWN_MAX_BYTES, is_valid_name  # noqa: E402
 
 DEFAULT_TIMEOUT_SECONDS = 300
+SCANNERS = (normalize.CISCO, normalize.BETTERLEAKS)
 
 
 @dataclass
@@ -56,7 +66,6 @@ def scanner_env(home: Path) -> dict[str, str]:
         "PYTHONUTF8": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
         "NO_COLOR": "1",
-        "SKILLSPECTOR_LOG_LEVEL": "WARNING",
     }
 
 
@@ -65,11 +74,6 @@ def _binary(env_var: str, default: str) -> str | None:
     if configured:
         return configured if os.path.isfile(configured) and os.access(configured, os.X_OK) else None
     return shutil.which(default)
-
-
-def skillspector_command(binary: str, skill_dir: Path, out: Path) -> list[str]:
-    """SkillSpector, rules only: --no-llm keeps every byte local (no provider is configured either)."""
-    return [binary, "scan", str(skill_dir), "--no-llm", "--format", "json", "--output", str(out)]
 
 
 def cisco_command(binary: str, skill_dir: Path, out: Path) -> list[str]:
@@ -118,8 +122,36 @@ def run_scanner(command: list[str], out: Path, ok_codes: set[int], env: dict[str
         return RunResult(error=f"Could not read the report: {error}")
 
 
-def scan_skill_dir(skill_dir: Path, checked_at: str | None = None, timeout: int | None = None) -> list[dict[str, str]]:
-    """Run SkillSpector, Cisco skill-scanner and Betterleaks on skill_dir; return three checks."""
+def review_markdown(markdown: str, checked_at: str) -> dict[str, Any]:
+    """The AI security review of one SKILL.md text. Never raises: a crash is a check that did not finish."""
+    if len(markdown.encode("utf-8")) > MARKDOWN_MAX_BYTES:
+        return normalize.did_not_finish(normalize.AI_REVIEW, checked_at, "SKILL.md is larger than 1 MB, so it was not reviewed")
+    try:
+        return ai_review.review(markdown, checked_at)
+    except Exception as error:  # noqa: BLE001 - a bug here must cost one warning, never a pass or the whole queue
+        return normalize.did_not_finish(normalize.AI_REVIEW, checked_at, f"The AI review crashed: {type(error).__name__}")
+
+
+def ai_review_check(skill_dir: Path, checked_at: str) -> dict[str, Any]:
+    """The AI security review of skill_dir/SKILL.md. Never raises: a crash is a check that did not finish."""
+    try:
+        raw = (skill_dir / "SKILL.md").read_bytes()
+    except OSError as error:
+        return normalize.did_not_finish(normalize.AI_REVIEW, checked_at, f"Could not read SKILL.md: {error.strerror or error}")
+    if len(raw) > MARKDOWN_MAX_BYTES:
+        return normalize.did_not_finish(normalize.AI_REVIEW, checked_at, "SKILL.md is larger than 1 MB, so it was not reviewed")
+    try:
+        markdown = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return normalize.did_not_finish(normalize.AI_REVIEW, checked_at, "SKILL.md is not UTF-8, so it was not reviewed")
+    return review_markdown(markdown, checked_at)
+
+
+def scanner_checks(skill_dir: Path, checked_at: str | None = None, timeout: int | None = None) -> list[dict[str, Any]]:
+    """Run Cisco skill-scanner, then Betterleaks, on skill_dir; return their two checks.
+
+    Needs no secret and no network: the rules-only half of the checks.
+    """
     checked_at = checked_at or today_utc()
     timeout = timeout or int(os.environ.get("SCAN_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
     skill_dir = skill_dir.resolve()
@@ -130,17 +162,6 @@ def scan_skill_dir(skill_dir: Path, checked_at: str | None = None, timeout: int 
         empty.mkdir()
         env = scanner_env(home)
         checks = []
-
-        binary = _binary("SKILLSPECTOR_BIN", "skillspector")
-        if binary is None:
-            checks.append(normalize.did_not_finish(normalize.SKILLSPECTOR, checked_at, "SkillSpector is not installed"))
-        else:
-            out = work / "skillspector.json"
-            run = run_scanner(skillspector_command(binary, skill_dir, out), out, {0, 1}, env, work, timeout)
-            checks.append(
-                normalize.did_not_finish(normalize.SKILLSPECTOR, checked_at, run.error)
-                if run.error else normalize.normalize_skillspector(run.report, checked_at)
-            )
 
         binary = _binary("SKILL_SCANNER_BIN", "skill-scanner")
         if binary is None:
@@ -163,27 +184,54 @@ def scan_skill_dir(skill_dir: Path, checked_at: str | None = None, timeout: int 
                 normalize.did_not_finish(normalize.BETTERLEAKS, checked_at, run.error)
                 if run.error else normalize.normalize_betterleaks(run.report, checked_at)
             )
-        return checks
+    return checks
 
 
-def scan_markdown(name: str, markdown: str, checked_at: str | None = None) -> list[dict[str, str]]:
-    """Write markdown to a fresh temp folder as <name>/SKILL.md and scan it.
+def scan_skill_dir(skill_dir: Path, checked_at: str | None = None, timeout: int | None = None) -> list[dict[str, Any]]:
+    """Run Cisco skill-scanner, Betterleaks, then the AI review on skill_dir; return three checks."""
+    checked_at = checked_at or today_utc()
+    return scanner_checks(skill_dir, checked_at, timeout) + [ai_review_check(skill_dir.resolve(), checked_at)]
+
+
+def _in_skill_folder(name: str, markdown: str, run: Callable[[Path], list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Write markdown to a fresh temp folder as <name>/SKILL.md and call run on that folder.
 
     The name is checked against the skill-name pattern before it touches a path.
     """
     if not is_valid_name(name):
         raise ValueError("invalid skill name")
-    checked_at = checked_at or today_utc()
-    if len(markdown.encode("utf-8")) > MARKDOWN_MAX_BYTES:
-        reason = "SKILL.md is larger than 1 MB, so it was not scanned"
-        return [normalize.did_not_finish(pair, checked_at, reason)
-                for pair in (normalize.SKILLSPECTOR, normalize.CISCO, normalize.BETTERLEAKS)]
     with tempfile.TemporaryDirectory(prefix="skill-scan-in-") as root_name:
         skill_dir = Path(root_name) / name
         skill_dir.mkdir()
         with open(skill_dir / "SKILL.md", "w", encoding="utf-8", newline="") as handle:
             handle.write(markdown)
-        return scan_skill_dir(skill_dir, checked_at)
+        return run(skill_dir)
+
+
+def _too_large(pairs: tuple[tuple[str, str], ...], checked_at: str) -> list[dict[str, Any]]:
+    reason = "SKILL.md is larger than 1 MB, so it was not scanned"
+    return [normalize.did_not_finish(pair, checked_at, reason) for pair in pairs]
+
+
+def scan_markdown_scanners(name: str, markdown: str, checked_at: str | None = None,
+                           timeout: int | None = None) -> list[dict[str, Any]]:
+    """The two scanner checks on one SKILL.md text. Never calls the AI review."""
+    checked_at = checked_at or today_utc()
+    if not is_valid_name(name):
+        raise ValueError("invalid skill name")
+    if len(markdown.encode("utf-8")) > MARKDOWN_MAX_BYTES:
+        return _too_large(SCANNERS, checked_at)
+    return _in_skill_folder(name, markdown, lambda folder: scanner_checks(folder, checked_at, timeout))
+
+
+def scan_markdown(name: str, markdown: str, checked_at: str | None = None) -> list[dict[str, Any]]:
+    """All three checks on one SKILL.md text, in one process."""
+    checked_at = checked_at or today_utc()
+    if not is_valid_name(name):
+        raise ValueError("invalid skill name")
+    if len(markdown.encode("utf-8")) > MARKDOWN_MAX_BYTES:
+        return _too_large(SCANNERS + (normalize.AI_REVIEW,), checked_at)
+    return _in_skill_folder(name, markdown, lambda folder: scan_skill_dir(folder, checked_at))
 
 
 def main(argv: list[str] | None = None) -> int:

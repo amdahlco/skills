@@ -1,7 +1,8 @@
 # Keeps the scheduled workflows on. GitHub turns off every scheduled workflow
 # in a public repository after 60 days with no repository activity, and the
 # mirror commits only when the catalog changes. If the scan schedule stops,
-# no submitted skill can be approved on amdahl.ai: Approve waits for the scans.
+# no submitted skill can publish on amdahl.ai: a skill publishes only when
+# every check has a result, and the checks run on that schedule.
 #
 # Twice a month (the 1st and the 15th, so one failed run is not fatal) this job writes the time to .github/keepalive and pushes that
 # one file to main. main is protected, so it pushes with the same GitHub App

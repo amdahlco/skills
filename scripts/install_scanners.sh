@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Install the three pinned scanners into one folder.
+# Install the two pinned scanners into one folder.
 #
 #   bash scripts/install_scanners.sh [DEST]
 #
 # DEST defaults to $RUNNER_TEMP/scanners in GitHub Actions, else ./.scanners.
-# Each Python scanner gets its own venv, installed from a hash-locked list in
+# Cisco skill-scanner gets its own venv, installed from a hash-locked list in
 # scanners/. Betterleaks comes from its GitHub release and is checked against
 # the SHA-256 pinned below. In Actions the binary paths go to $GITHUB_ENV;
 # elsewhere they are printed as export lines.
@@ -14,7 +14,6 @@
 
 set -euo pipefail
 
-SKILLSPECTOR_VERSION="2.13.0"
 SKILL_SCANNER_VERSION="2.3.1"
 BETTERLEAKS_VERSION="1.9.0"
 # From https://github.com/betterleaks/betterleaks/releases/download/v1.9.0/checksums.txt
@@ -43,8 +42,6 @@ install_venv() {  # $1 = venv name, $2 = lock file
     --require-hashes --no-deps -r "$repo_root/scanners/$2"
 }
 
-echo "Installing SkillSpector $SKILLSPECTOR_VERSION"
-install_venv skillspector skillspector.txt
 echo "Installing Cisco skill-scanner $SKILL_SCANNER_VERSION"
 install_venv skill-scanner cisco-skill-scanner.txt
 
@@ -61,7 +58,6 @@ mkdir -p "$dest/betterleaks"
 tar -xzf "$tarball" -C "$dest/betterleaks" betterleaks
 rm -f "$tarball"
 
-skillspector_bin="$dest/skillspector/bin/skillspector"
 skill_scanner_bin="$dest/skill-scanner/bin/skill-scanner"
 betterleaks_bin="$dest/betterleaks/betterleaks"
 
@@ -72,18 +68,15 @@ check_version() {  # $1 = label, $2 = expected text, $3 = actual output
     *) echo "$1 version check failed: expected $2, got $3" >&2; exit 1 ;;
   esac
 }
-check_version SkillSpector "v$SKILLSPECTOR_VERSION" "$("$skillspector_bin" --version)"
 check_version skill-scanner "$SKILL_SCANNER_VERSION" "$("$skill_scanner_bin" --version)"
 check_version Betterleaks "$BETTERLEAKS_VERSION" "$("$betterleaks_bin" version)"
 
 if [ -n "${GITHUB_ENV:-}" ]; then
   {
-    echo "SKILLSPECTOR_BIN=$skillspector_bin"
     echo "SKILL_SCANNER_BIN=$skill_scanner_bin"
     echo "BETTERLEAKS_BIN=$betterleaks_bin"
   } >> "$GITHUB_ENV"
 else
-  echo "export SKILLSPECTOR_BIN='$skillspector_bin'"
   echo "export SKILL_SCANNER_BIN='$skill_scanner_bin'"
   echo "export BETTERLEAKS_BIN='$betterleaks_bin'"
 fi

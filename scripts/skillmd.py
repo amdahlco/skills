@@ -15,7 +15,7 @@ import re
 
 NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 NAME_MAX = 64
-MARKDOWN_MAX_BYTES = 1024 * 1024  # SkillSpector reads at most 1 MB per file
+MARKDOWN_MAX_BYTES = 1024 * 1024  # a larger SKILL.md is not scanned or reviewed
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 

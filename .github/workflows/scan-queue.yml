@@ -1,10 +1,36 @@
-# Scans skills that amdahl.ai has waiting, then posts the results back.
+# Checks skills that amdahl.ai has waiting, then posts the results back.
 #
-# The scanners READ each SKILL.md. Nothing submitted is ever executed.
+# The checks READ each SKILL.md. Nothing submitted is ever executed.
+#
+# ONE job, and nothing passes between steps as a workflow artifact: this repo
+# is public, so anyone can download its artifacts, and they would carry skills
+# that are not published and the AI review's private findings. The steps hand
+# files to each other in $RUNNER_TEMP/scan instead (scripts/handoff.py), and
+# the first step closes the runner user's home and $RUNNER_TEMP to other users.
+#
+# Who holds what:
+#   - SKILLS_SCAN_TOKEN: only "Claim the queue" and "Post the results".
+#   - The two rules-only scanners run as "skillscan", a user made in this job
+#     with no sudo rights and an empty environment apart from PATH and its work
+#     folder (scripts/sandbox.sh). They read the claimed skills from one file
+#     and write their results to another. No secret reaches them.
+#   - ANTHROPIC_API_KEY (secret SKILLS_REVIEW_ANTHROPIC_KEY): only the
+#     "AI security review" step, whose env holds nothing else. It sends the
+#     SKILL.md text, and nothing else, to the Anthropic API.
+#
+# The steps after the scan must run nothing the scanner user could change.
+# Every step runs in root's bash by its full path (defaults below), and every
+# Python step runs root's /usr/bin/python3 with -I -S (no site module, so no
+# .pth file or sitecustomize runs). setup-python's Python lives in /opt and
+# only builds the scanners before the scanner user exists. scripts/sandbox.sh
+# closes the folders on PATH and LD_LIBRARY_PATH to other users before the
+# scanner user exists, and proves as that user, before it reads a skill, that
+# it can write nothing those steps run or load.
+#
 # This repo is public, so these logs are public: the scripts print only the
-# item kind, its place in the queue and the three results. They never print
-# the id (a submission's id is the only key to its status on amdahl.ai), the
-# skill text or the token.
+# item kind, its place in the queue, the two scanners' results and whether the
+# AI review finished. They never print the id, the skill text, a finding, the
+# token or the key.
 name: Scan queue
 
 on:
@@ -25,9 +51,10 @@ jobs:
     name: Scan skills waiting on amdahl.ai
     if: github.repository == 'amdahlco/skills'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      AMDAHL_SITE: ${{ vars.AMDAHL_SITE || 'https://amdahl.ai' }}
+    timeout-minutes: 50
+    defaults:
+      run:
+        shell: /usr/bin/bash --noprofile --norc -eo pipefail {0}
     steps:
       - name: Check out the scan code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -39,22 +66,50 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Fetch the queue
+      - name: Keep the temp folder private
+        run: chmod 700 "$HOME" "$RUNNER_TEMP"
+
+      - name: Claim the queue
         id: queue
         timeout-minutes: 2
         env:
+          AMDAHL_SITE: ${{ vars.AMDAHL_SITE || 'https://amdahl.ai' }}
           SKILLS_SCAN_TOKEN: ${{ secrets.SKILLS_SCAN_TOKEN }}
-        run: python3 -I scripts/scan_queue.py fetch --out "$RUNNER_TEMP/queue.json"
+        run: /usr/bin/python3 -I -S scripts/scan_queue.py claim --out "$RUNNER_TEMP/scan"
 
       - name: Install the scanners
         if: steps.queue.outputs.count != '0'
         timeout-minutes: 10
-        run: bash scripts/install_scanners.sh
+        run: bash scripts/sandbox.sh install
 
-      - name: Scan and post results
-        if: steps.queue.outputs.count != '0' || steps.queue.outputs.invalid != '0'
+      - name: Make the scanner user
+        if: steps.queue.outputs.count != '0'
+        timeout-minutes: 2
+        run: bash scripts/sandbox.sh setup
+
+      - name: Run the scanners as the scanner user
+        id: scan
+        if: steps.queue.outputs.count != '0'
+        timeout-minutes: 12
+        run: bash scripts/sandbox.sh scan "$RUNNER_TEMP/scan/items.json" "$RUNNER_TEMP/scan/scanners.json"
+
+      # Runs even when a scanner step failed: its fail can still decline a skill.
+      # But never while a process of the scanner user may still run: after a failed
+      # scan step, only when sandbox.sh reported scan_user_stopped.
+      - name: AI security review
+        if: ${{ !cancelled() && steps.queue.outcome == 'success' && steps.queue.outputs.count != '0' && (steps.scan.outcome != 'failure' || steps.scan.outputs.scan_user_stopped == 'true') }}
         timeout-minutes: 15
         env:
+          ANTHROPIC_API_KEY: ${{ secrets.SKILLS_REVIEW_ANTHROPIC_KEY }}
+        run: /usr/bin/python3 -I -S scripts/scan_queue.py ai-review --items "$RUNNER_TEMP/scan/items.json" --out "$RUNNER_TEMP/scan/ai.json"
+
+      # Runs even when a check step failed: what is missing is posted as "Scanner did not finish".
+      # Not while a process of the scanner user may still run (as above); the site
+      # then hands the claimed items out again later.
+      - name: Post the results
+        if: ${{ !cancelled() && steps.queue.outcome == 'success' && (steps.queue.outputs.count != '0' || steps.queue.outputs.invalid != '0') && (steps.scan.outcome != 'failure' || steps.scan.outputs.scan_user_stopped == 'true') }}
+        timeout-minutes: 3
+        env:
+          AMDAHL_SITE: ${{ vars.AMDAHL_SITE || 'https://amdahl.ai' }}
           SKILLS_SCAN_TOKEN: ${{ secrets.SKILLS_SCAN_TOKEN }}
-          SCAN_TIMEOUT_SECONDS: "180"
-        run: python3 -I scripts/scan_queue.py run --queue "$RUNNER_TEMP/queue.json"
+        run: /usr/bin/python3 -I -S scripts/scan_queue.py post --dir "$RUNNER_TEMP/scan"
