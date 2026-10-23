@@ -9,9 +9,9 @@ A skill is a folder named after the skill, with a `SKILL.md` file in it. The fil
 Install from [amdahl.ai/skills](https://amdahl.ai/skills). Each skill's page gives you two ways to install it:
 
 - Hand the page to your agent and let it walk you through it.
-- Copy the command on the page and run it in your project. It downloads the skill from amdahl.ai into `.claude/skills/<name>/`, the skills folder for Claude Code.
+- Copy the command on the page, `npx amdahl skills add <publisher>/<skill>`, and run it. At a terminal it asks one question: this project, or every project on your computer. It puts the skill in the skills folder of each agent it finds: `.claude/skills/<name>/` for Claude Code, and `.agents/skills/<name>/` for Codex, Cursor and other agents. It needs Node.js 20 or later.
 
-For a single-file skill, the command saves its `SKILL.md` as `.claude/skills/<name>/SKILL.md`. For a folder skill, the command downloads the whole folder from amdahl.ai as one `.tar.gz` file and unpacks it into `.claude/skills/<name>/`. Do not save only the `SKILL.md` of a folder skill: the skill cannot run without its other files.
+For a single-file skill, the command saves its `SKILL.md` as `<name>/SKILL.md` in that skills folder. For a folder skill, the command downloads the whole folder from amdahl.ai as one `.tar.gz` file and unpacks it into `<name>/` there. Either way, it checks the download against the checksum amdahl.ai lists, and writes nothing if the check fails. Do not save only the `SKILL.md` of a folder skill: the skill cannot run without its other files.
 
 For each single-file skill, the file in `skills/` here has the same bytes the site serves.
 
@@ -49,7 +49,7 @@ amdahl.ai is the source of truth for the catalog. This repo does three jobs on G
 
 1. **Security scans.** Every 10 minutes, [`scan-queue.yml`](.github/workflows/scan-queue.yml) pulls skills that wait for a scan from amdahl.ai. It runs the three scanners on each one and posts the results back.
 2. **Public mirror.** Every hour, [`mirror.yml`](.github/workflows/mirror.yml) writes each published skill to `skills/<publisher>/<name>/SKILL.md`. It also removes skills that are no longer published. The git history is a public record of every published version. The mirror does not copy a folder skill (a skill that installs from a tar.gz, such as system-diagram), because its source is its own repository.
-3. **Keepalive.** On the first day of each month, [`keepalive.yml`](.github/workflows/keepalive.yml) commits the time to `.github/keepalive`. GitHub turns off scheduled workflows in a public repository after 60 days with no activity, and the mirror commits only when the catalog changes.
+3. **Keepalive.** On the 1st and the 15th of each month, [`keepalive.yml`](.github/workflows/keepalive.yml) commits the time to `.github/keepalive`. GitHub turns off scheduled workflows in a public repository after 60 days with no activity, and the mirror commits only when the catalog changes.
 
 ## Layout
 

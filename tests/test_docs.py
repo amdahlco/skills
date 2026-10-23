@@ -37,7 +37,11 @@ class Readme(unittest.TestCase):
         # Saving a folder skill's SKILL.md alone leaves out the files it runs.
         install = section(self.text, "## Install a skill")
         self.assertIn("Install from [amdahl.ai/skills](https://amdahl.ai/skills).", install)
-        self.assertIn("saves its `SKILL.md` as `.claude/skills/<name>/SKILL.md`", install)
+        self.assertIn("npx amdahl skills add <publisher>/<skill>", install)
+        self.assertIn("this project, or every project on your computer", install)
+        self.assertIn("`.claude/skills/<name>/` for Claude Code, and `.agents/skills/<name>/` for Codex, Cursor and other agents", install)
+        self.assertIn("saves its `SKILL.md` as `<name>/SKILL.md` in that skills folder", install)
+        self.assertIn("writes nothing if the check fails", install)
         self.assertIn("downloads the whole folder from amdahl.ai as one `.tar.gz` file", install)
         self.assertIn("Do not save only the `SKILL.md` of a folder skill", install)
 
