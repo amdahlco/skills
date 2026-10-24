@@ -1,9 +1,21 @@
-# Proves the scan path works on GitHub's own runners, with no secrets: the
-# unit tests, then the three pinned scanners installed exactly as the queue
-# installs them, run on a clean skill, a skill with hidden instructions and
-# a skill with a secret (made at run time), each checked against the verdict
-# it must get (scripts/self_test.py). Runs on every push and pull request,
-# and by hand.
+# Proves the scan path works on GitHub's own runners, the way the queue runs
+# it: the unit tests (no network, no secrets), then the two pinned scanners
+# installed and run as the unprivileged scanner user exactly as scan-queue.yml
+# does (scripts/sandbox.sh), on a clean skill, a skill with hidden
+# instructions, a skill with a secret (made at run time), a benign skill of
+# about 60 KB and a skill that loads its steps from a URL while it runs. Each
+# verdict is checked against the one it must get (scripts/self_test.py check).
+#
+# The AI review runs on the same samples in its own step, the only step that
+# gets the SKILLS_REVIEW_ANTHROPIC_KEY secret, and only when the secret is there
+# (never on a pull request from a fork). Without it the check step says the
+# review was skipped.
+#
+# Every step runs in root's bash by its full path, and every Python step after
+# the scanner user exists runs root's /usr/bin/python3 -I -S, as in
+# scan-queue.yml; the scan step proves the scanner user can change neither.
+#
+# Runs on every push and pull request, and by hand.
 name: Self-test
 
 on:
@@ -23,7 +35,11 @@ jobs:
   self-test:
     name: Scanners give the right verdicts
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Room for every step's own limit (10 + 2 + 12 + 15 minutes) plus setup.
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: /usr/bin/bash --noprofile --norc -eo pipefail {0}
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -38,10 +54,29 @@ jobs:
       - name: Unit tests
         run: python3 -m unittest discover -s tests -t tests
 
+      - name: Keep the temp folder private
+        run: chmod 700 "$HOME" "$RUNNER_TEMP"
+
       - name: Install the scanners
         timeout-minutes: 10
-        run: bash scripts/install_scanners.sh
+        run: bash scripts/sandbox.sh install
 
-      - name: Scan the samples
-        timeout-minutes: 8
-        run: python3 -I scripts/self_test.py
+      - name: Make the scanner user
+        timeout-minutes: 2
+        run: bash scripts/sandbox.sh setup
+
+      - name: Write the samples
+        run: /usr/bin/python3 -I -S scripts/self_test.py items --out "$RUNNER_TEMP/self-test"
+
+      - name: Run the scanners as the scanner user
+        timeout-minutes: 12
+        run: bash scripts/sandbox.sh scan "$RUNNER_TEMP/self-test/items.json" "$RUNNER_TEMP/self-test/scanners.json"
+
+      - name: AI security review
+        timeout-minutes: 15
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.SKILLS_REVIEW_ANTHROPIC_KEY }}
+        run: /usr/bin/python3 -I -S scripts/scan_queue.py ai-review --items "$RUNNER_TEMP/self-test/items.json" --out "$RUNNER_TEMP/self-test/ai.json"
+
+      - name: Check the verdicts
+        run: /usr/bin/python3 -I -S scripts/self_test.py check --dir "$RUNNER_TEMP/self-test"

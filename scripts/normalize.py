@@ -4,13 +4,19 @@ A check is:
     {"name", "by", "result": "pass" | "warn" | "fail", "summary" (one line,
      <= 300 chars), "checkedAt": "YYYY-MM-DD", "details" (<= 4000 chars)}
 
-Severity map (every scanner): none, info, low -> pass; medium -> warn;
-high, critical -> fail; anything unknown -> warn. A scanner that errors or
-returns output we cannot read becomes `warn` with the summary
-"Scanner did not finish". A scan whose report does not show that it covered
-the whole skill is at least `warn` (fail closed): a missing field, an analyzer
-status we do not list as finished, or a shape we do not expect counts as a gap.
-Nothing is ever passed silently.
+`details` is text, with one exception: a "did not finish" row that carries a
+reason amdahl.ai acts on has details {"reason": <one of REASONS>, "text": ...}.
+Today the only reason is BUDGET, and only the AI review's row carries it.
+
+Severity map (Cisco skill-scanner): none, info, low -> pass; medium -> warn;
+high, critical -> fail; anything unknown -> warn. Betterleaks gives a
+confidence instead (see normalize_betterleaks). The AI review gives a verdict:
+pass -> pass, review -> warn, block -> fail. A scanner or a review that errors
+or returns output we cannot read becomes `warn` with the summary
+"Scanner did not finish". A Cisco report that does not show it covered the
+whole skill is at least `warn` (fail closed): a missing field, a failed
+analyzer or a shape we do not expect counts as a gap. Nothing is ever passed
+silently.
 
 Standard library only.
 """
@@ -21,34 +27,25 @@ import os
 import unicodedata
 from typing import Any
 
-SKILLSPECTOR = ("Prompt injection and malicious instructions", "NVIDIA SkillSpector")
 CISCO = ("Threat analysis", "Cisco AI Defense skill-scanner")
 BETTERLEAKS = ("Secrets", "Betterleaks")
+AI_REVIEW = ("AI security review", "Amdahl AI review")
 
+# Must equal SCANNER_DID_NOT_FINISH in amdahl.ai's lib/skills/scanners.ts.
 DID_NOT_FINISH = "Scanner did not finish"
+# Anthropic refused the AI review for money: a spend limit, the monthly spend
+# cap, the credit balance or billing (ai_review.is_budget_refusal). amdahl.ai
+# queues the item again without counting one of its attempts, and tells the
+# team once per incident.
+BUDGET = "budget"
+REASONS = (BUDGET,)
 SUMMARY_MAX = 300
 DETAILS_MAX = 4000
 
 SEVERITY_RANK = {"NONE": 0, "INFO": 1, "LOW": 2, "MEDIUM": 3, "HIGH": 4, "CRITICAL": 5}
 # Cisco skill-scanner reports a skill with no findings as max_severity "SAFE" (is_safe true).
-# For Cisco only it reads as NONE: without it, every clean skill graded as an unknown severity,
-# a warning. SkillSpector never says "SAFE", so from SkillSpector it stays unknown.
+# It reads as NONE: without it, every clean skill graded as an unknown severity, a warning.
 CISCO_SEVERITY_ALIASES = {"SAFE": "NONE"}
-
-# SkillSpector marks a scan partial when a SKILL.md names a file it cannot read. A submission
-# is the SKILL.md alone, so a missing referenced file is expected and is not a warning on its
-# own; the summary still says so. Any other gap (a front matter it cannot parse, a file too
-# large to parse, obfuscated text, excluded executables, a reason we do not know) still warns.
-EXPECTED_SKILLSPECTOR_GAPS = frozenset({"reference_missing"})
-# SkillSpector analyzer statuses that show an analyzer did all its work or had none to do.
-# An allowlist: failed, degraded, skipped or a status we have not seen is a gap.
-FINISHED_ANALYZER_STATUSES = frozenset({"completed", "not_applicable"})
-# The model-based analyzers. --no-llm turns them off, so "disabled" (by configuration) is
-# expected from these and no others. Real 2.13.0 output, 2026-10-23.
-MODEL_ANALYZERS = frozenset({
-    "meta_analyzer", "semantic_developer_intent", "semantic_quality_policy", "semantic_security_discovery",
-})
-UNFINISHED_WORK = ("failed", "partial", "skipped", "unaccounted")
 RESULT_RANK = {"pass": 0, "warn": 1, "fail": 2}
 
 
@@ -107,111 +104,41 @@ def _check(pair: tuple[str, str], result: str, summary: str, checked_at: str, de
     return check
 
 
-def did_not_finish(pair: tuple[str, str], checked_at: str, reason: str) -> dict[str, str]:
-    """The check we report when a scanner errors, times out or prints output we cannot read."""
-    return _check(pair, "warn", DID_NOT_FINISH, checked_at, clean_text(reason, DETAILS_MAX))
+def did_not_finish(pair: tuple[str, str], checked_at: str, reason: str, *, code: str | None = None) -> dict[str, Any]:
+    """The check we report when a scanner errors, times out or prints output we cannot read.
+
+    With `code` (one of REASONS), details is {"reason": code, "text": reason}:
+    the one shape amdahl.ai reads a reason from. Without it, details is the text.
+    """
+    if code is None:
+        return _check(pair, "warn", DID_NOT_FINISH, checked_at, clean_text(reason, DETAILS_MAX))
+    if code not in REASONS:
+        raise ValueError(f"unknown reason code {code!r}")
+    check: dict[str, Any] = _check(pair, "warn", DID_NOT_FINISH, checked_at)
+    check["details"] = {"reason": code, "text": clean_text(reason, DETAILS_MAX - 100)}
+    return check
+
+
+def reason_of(check: dict[str, Any]) -> str | None:
+    """The reason code in a check's details, or None when it carries none."""
+    details = check.get("details")
+    reason = details.get("reason") if isinstance(details, dict) else None
+    return reason if reason in REASONS else None
 
 
 def _plural(count: int, word: str) -> str:
     return f"{count} {word}" if count == 1 else f"{count} {word}s"
 
 
-def _summary(findings: list[tuple[int, str]], top: str) -> str:
+def _summary(findings: list[tuple[int, str]], top: str, where: str = "") -> str:
+    """'N findings, highest TOP: first title[, where]; other titles'. where locates the first one."""
     titles = []
     for _, title in findings:
         if title not in titles:
             titles.append(title)
+    if where:
+        titles[0] = f"{titles[0]}, {where}"
     return f"{_plural(len(findings), 'finding')}, highest {top}: " + "; ".join(titles)
-
-
-def _one_of(value: object, allowed: frozenset[str]) -> bool:
-    return isinstance(value, str) and value in allowed
-
-
-def _analyzer_gaps(statuses: Any) -> list[str]:
-    """The SkillSpector analyzers that do not show they finished."""
-    if not isinstance(statuses, list) or not statuses:
-        return ["no analyzer statuses"]
-    gaps = []
-    for entry in statuses:
-        if not isinstance(entry, dict):
-            gaps.append("an analyzer status is not an object")
-            continue
-        name = clean_text(entry.get("analyzer_id", "?"), 60)
-        status = entry.get("status")
-        turned_off = (
-            status == "disabled"
-            and entry.get("reason_code") == "disabled_by_configuration"
-            and _one_of(entry.get("analyzer_id"), MODEL_ANALYZERS)
-        )
-        if not _one_of(status, FINISHED_ANALYZER_STATUSES) and not turned_off:
-            gaps.append(f"analyzer {name} {clean_text(status, 40)}")
-        elif entry.get("error") or any(entry.get(count) for count in UNFINISHED_WORK):
-            gaps.append(f"analyzer {name} left work unfinished")
-    return gaps
-
-
-def _skillspector_gaps(report: dict) -> tuple[list[str], bool]:
-    """Why SkillSpector's own coverage record does not show a whole scan.
-
-    Returns (gaps, references_missing). No gaps with references_missing true is
-    a scan that missed only files the SKILL.md names but does not ship.
-    """
-    completeness = report.get("analysis_completeness")
-    if not isinstance(completeness, dict):
-        return ["no analysis_completeness block"], False
-    gaps = []
-    complete = completeness.get("is_complete")
-    if not isinstance(complete, bool):
-        gaps.append("is_complete is not true or false")
-    elif completeness.get("status") != ("complete" if complete else "partial"):
-        gaps.append(f"status {clean_text(completeness.get('status'), 40)} beside is_complete {complete}")
-    if report.get("execution_successful") is not True or completeness.get("execution_successful") is not True:
-        gaps.append("execution_successful is not true")
-    gaps += _analyzer_gaps(completeness.get("analyzer_statuses"))
-
-    references_missing = False
-    ledger = completeness.get("ledger_exceptions")
-    if not isinstance(ledger, list):
-        gaps.append("ledger_exceptions is not a list")
-    elif complete is False and not ledger:
-        gaps.append("partial with no reason given")
-    else:
-        for exception in ledger:
-            reason = exception.get("reason_code") if isinstance(exception, dict) else None
-            if (
-                _one_of(reason, EXPECTED_SKILLSPECTOR_GAPS)
-                and exception.get("fatal") is False
-                and exception.get("outcome") == "partial"
-            ):
-                references_missing = True
-            else:
-                gaps.append(f"ledger exception {clean_text(reason, 60)}")
-        if complete is True and ledger:
-            gaps.append("ledger exceptions beside is_complete true")
-
-    # The ledger alone is not enough: a failed analyzer can sit beside a
-    # reference_missing gap (found in review, 2026-10-23).
-    total = completeness.get("total_components")
-    if not (
-        isinstance(total, int)
-        and total > 0
-        and completeness.get("scanned_components") == total
-        and completeness.get("fully_inspected_files") == total
-        and completeness.get("partially_inspected_files") == 0
-        and completeness.get("entirely_uninspected_files") == 0
-    ):
-        gaps.append("not every file fully inspected")
-    if completeness.get("limitations") != []:
-        gaps.append("limitations listed")
-    if completeness.get("scope_exclusions") != []:
-        gaps.append("files excluded from scope")
-    if (
-        completeness.get("findings_before_filtering") != completeness.get("findings_after_filtering")
-        or report.get("suppressed_count") != 0
-    ):
-        gaps.append("findings filtered or suppressed")
-    return gaps, references_missing
 
 
 def _cisco_gaps(report: dict) -> list[str]:
@@ -234,63 +161,13 @@ def _cisco_gaps(report: dict) -> list[str]:
     return gaps
 
 
-def normalize_skillspector(report: Any, checked_at: str) -> dict[str, str]:
-    """NVIDIA SkillSpector `scan --format json` report -> one check."""
-    try:
-        if not isinstance(report, dict) or not isinstance(report.get("issues"), list):
-            raise ScannerOutputError("report has no 'issues' list")
-        if report.get("execution_successful") is False:
-            return did_not_finish(SKILLSPECTOR, checked_at, "SkillSpector reported execution_successful=false")
-        risk = report.get("risk_assessment") or {}
-        if not isinstance(risk, dict):
-            raise ScannerOutputError("'risk_assessment' is not an object")
-        rows: list[tuple[int, str, str]] = []
-        for issue in report["issues"]:
-            if not isinstance(issue, dict):
-                raise ScannerOutputError("an issue is not an object")
-            severity = str(issue.get("severity", "")).upper()
-            rule = clean_text(issue.get("id", "?"), 20)
-            title = clean_text(issue.get("pattern") or issue.get("category") or rule, 80)
-            location = issue.get("location") or {}
-            where = clean_text(location.get("file", ""), 80) if isinstance(location, dict) else ""
-            line = location.get("start_line") if isinstance(location, dict) else None
-            if line:
-                where = f"{where} line {line}"
-            match = clean_text(issue.get("finding", ""), 120)
-            text = f"- {severity} {rule} {title}, {where}"
-            if match:
-                text += f': "{match}"'
-            rows.append((SEVERITY_RANK.get(severity, 3), f"{title} ({rule})", text))
-    except ScannerOutputError as error:
-        return did_not_finish(SKILLSPECTOR, checked_at, f"Unexpected SkillSpector output: {error}")
-
-    rows.sort(key=lambda row: -row[0])
-    severities = [str(issue.get("severity", "")).upper() for issue in report["issues"]]
-    # The stricter of the worst single issue and the scanner's own score band.
-    severities.append(str(risk.get("severity", "NONE")).upper())
-    worst = max(severities, key=lambda s: SEVERITY_RANK.get(s, 3))
-    result = worst_result([result_for_severity(s) for s in severities])
-
-    gaps, references_missing = _skillspector_gaps(report)
-    if gaps:
-        result = worst_result([result, "warn"])
-
-    if rows:
-        summary = _summary([(r[0], r[1]) for r in rows], worst)
-    else:
-        summary = "No findings"
-    if gaps:
-        summary = "Partial coverage. " + summary
-    elif references_missing:
-        summary = "Referenced files not included. " + summary
-    head = (
-        f"Risk score {risk.get('score', '?')}/100, {risk.get('severity', '?')}, "
-        f"{risk.get('recommendation', '?')}. Rules only, no model."
-    )
-    if gaps:
-        head += " Coverage gaps: " + "; ".join(gaps) + "."
-    details = _clip_block([head] + [r[2] for r in rows], DETAILS_MAX)
-    return _check(SKILLSPECTOR, result, summary, checked_at, details)
+def line_number(value: object) -> int | None:
+    """A scanner's line number as a positive int, or None. amdahl.ai reads at most 6 digits."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str) and value.strip().isascii() and value.strip().isdigit():
+        value = int(value.strip())
+    return value if isinstance(value, int) and 0 < value < 1_000_000 else None
 
 
 def _cisco_severity(severity: object) -> str:
@@ -299,11 +176,18 @@ def _cisco_severity(severity: object) -> str:
 
 
 def normalize_cisco(report: Any, checked_at: str) -> dict[str, str]:
-    """Cisco AI Defense skill-scanner `scan --format json` report -> one check."""
+    """Cisco AI Defense skill-scanner `scan --format json` report -> one check.
+
+    The summary leads with the most severe finding and, when the scanner gives
+    one, its file and line ("..., highest HIGH: <title>, SKILL.md line 12; ..."):
+    amdahl.ai shows the submitter the first "line N" of a summary, and it never
+    stores details. Among findings of the same severity, one with a line comes
+    first. The summary never holds the matched text.
+    """
     try:
         if not isinstance(report, dict) or not isinstance(report.get("findings"), list):
             raise ScannerOutputError("report has no 'findings' list")
-        rows: list[tuple[int, str, str]] = []
+        rows: list[tuple[int, str, str, str]] = []
         severities = [_cisco_severity(report.get("max_severity", ""))]
         for finding in report["findings"]:
             if not isinstance(finding, dict):
@@ -322,18 +206,22 @@ def normalize_cisco(report: Any, checked_at: str) -> dict[str, str]:
                 text += f", {where}"
             if match:
                 text += f': "{match}"'
-            rows.append((SEVERITY_RANK.get(severity, 3), title, text))
+            line = line_number(finding.get("line_number"))
+            # The file's own name only: a scanner may report the temporary folder it read.
+            name = clean_text(os.path.basename(str(finding.get("file_path") or "")), 80)
+            located = f"{name} line {line}".strip() if line else ""
+            rows.append((SEVERITY_RANK.get(severity, 3), title, text, located))
     except ScannerOutputError as error:
         return did_not_finish(CISCO, checked_at, f"Unexpected skill-scanner output: {error}")
 
-    rows.sort(key=lambda row: -row[0])
+    rows.sort(key=lambda row: (-row[0], not row[3]))
     worst = max(severities, key=lambda s: SEVERITY_RANK.get(s, 3))
     result = worst_result([result_for_severity(s) for s in severities])
     gaps = _cisco_gaps(report)
     # is_safe false is the scanner's own verdict, not a gap: never a pass, never "partial".
     if gaps or report.get("is_safe") is False:
         result = worst_result([result, "warn"])
-    summary = _summary([(r[0], r[1]) for r in rows], worst) if rows else "No findings"
+    summary = _summary([(r[0], r[1]) for r in rows], worst, rows[0][3]) if rows else "No findings"
     if gaps:
         summary = "Partial coverage. " + summary
     head = "Static analyzers only (no LLM judge, no cloud services)."
@@ -383,3 +271,69 @@ def normalize_betterleaks(findings: Any, checked_at: str) -> dict[str, str]:
     summary = f"{_plural(len(rows), 'possible secret')}: {first}"
     details = _clip_block(["Values are redacted and never stored."] + [row[1] for row in rows], DETAILS_MAX)
     return _check(BETTERLEAKS, result, summary, checked_at, details)
+
+
+# The AI review (scripts/ai_review.py). Its verdict maps to a result, like a severity.
+VERDICT_RANK = {"pass": 0, "review": 1, "block": 2}
+VERDICT_TO_RESULT = {"pass": "pass", "review": "warn", "block": "fail"}
+# Each check's label, the first words of the AI review's summary. amdahl.ai reads the label
+# back to say in plain words what was flagged, so a label changes here and on the site together.
+AI_CHECK_WORDS = {
+    "data_leaving": "Data leaving",
+    "hidden_actions": "Hidden actions",
+    "overrides": "Overrides",
+    "persistence": "Persistence",
+    "remote_code": "Remote code",
+    "destructive": "Destructive actions",
+    "credentials": "Credentials",
+    "purpose_mismatch": "Purpose mismatch",
+}
+# At most this many characters of the skill's own text (the findings' quotes) go into details.
+QUOTE_BUDGET = 120
+QUOTE_MAX = 60
+
+
+def effective_verdict(review: dict[str, Any]) -> str:
+    """The stricter of the review's verdict and its worst finding.
+
+    A 'pass' that lists a finding is not a pass: the finding wins.
+    """
+    severities = [finding["severity"] for finding in review["findings"]]
+    return max([review["verdict"], *severities], key=lambda v: VERDICT_RANK[v])
+
+
+def normalize_ai_review(review: dict[str, Any], model: str, checked_at: str) -> dict[str, str]:
+    """A validated AI review (ai_review.parse_review) -> one check.
+
+    The summary names the most severe finding by its check, line and why; it
+    never quotes the skill. amdahl.ai parses it, so its shape is a contract:
+    the finding's AI_CHECK_WORDS label first, then " on line N" when the line
+    is known, then ": " and the why. A pass reads "No findings". Details list
+    every finding and say which model gave the verdict. Quotes of the skill
+    text share a budget of QUOTE_BUDGET characters across all of details.
+    """
+    verdict = effective_verdict(review)
+    result = VERDICT_TO_RESULT[verdict]
+    ranked = sorted(review["findings"], key=lambda f: -VERDICT_RANK[f["severity"]])  # stable: ties keep order
+    if result == "pass":
+        summary = "No findings"
+    elif not ranked:
+        summary = "Flagged, but the review named no finding"
+    else:
+        top = ranked[0]
+        label = AI_CHECK_WORDS[top["check"]]
+        where = f"{label} on line {top['line']}" if top["line"] else label
+        summary = f"{where}: {clean_text(top['why'], SUMMARY_MAX)}"
+
+    head = f"Verdict: {verdict}, from {model}. The model saw only the SKILL.md text, with no tools."
+    lines = [head]
+    budget = QUOTE_BUDGET
+    for finding in ranked:
+        where = f", line {finding['line']}" if finding["line"] else ""
+        text = f"- {finding['severity'].upper()} {finding['check']}{where}: {clean_text(finding['why'], 300)}"
+        if budget >= 10 and finding["quote"].strip():
+            quote = clean_text(finding["quote"], min(QUOTE_MAX, budget))
+            budget -= len(quote)
+            text += f' Quote: "{quote}"'
+        lines.append(text)
+    return _check(AI_REVIEW, result, summary, checked_at, _clip_block(lines, DETAILS_MAX))

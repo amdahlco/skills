@@ -1,4 +1,4 @@
-"""scan_queue.py against a local fake of the amdahl.ai scan API."""
+"""scan_queue.py against a local fake of the amdahl.ai scan API: claim, scan, ai-review and post."""
 
 from __future__ import annotations
 
@@ -7,18 +7,28 @@ import json
 import os
 import tempfile
 import threading
+import time
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+import urllib.request
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Iterator
+from unittest import mock
 
-from support import FIXTURES, ScannerEnv, fake_scanner
+from support import FIXTURES, FakeAnthropic, Response, ScannerEnv, fake_scanner, http_error, model_answer
 
+import ai_review
+import handoff
+import normalize
 import scan_queue
 from skillmd import sha256_hex
 
 TOKEN = "test-token-not-real"
+MODEL_KEY = "model-key-not-real"
 MARKDOWN = (FIXTURES / "inputs" / "meeting-follow-up.md").read_text(encoding="utf-8")
+CREDIT_LOW = (b'{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too '
+              b'low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}')
 
 
 def item(**changes: object) -> dict:
@@ -32,6 +42,25 @@ def item(**changes: object) -> dict:
     }
     base.update(changes)
     return base
+
+
+@contextmanager
+def environ(**values: str | None) -> Iterator[None]:
+    """Set (or, for None, remove) environment variables, and put them back after."""
+    saved = {key: os.environ.get(key) for key in values}
+    for key, value in values.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    try:
+        yield
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 class FakeSite(BaseHTTPRequestHandler):
@@ -103,13 +132,42 @@ class Flow(unittest.TestCase):
         FakeSite.posts, FakeSite.auth_seen, FakeSite.post_status = [], [], 200
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
-        os.environ["AMDAHL_SITE"] = self.base
-        os.environ["SKILLS_SCAN_TOKEN"] = TOKEN
+        self.work = self.dir / "scan"
+        self.clean_env = environ(AMDAHL_SITE=self.base, SKILLS_SCAN_TOKEN=None, ANTHROPIC_API_KEY=None)
+        self.clean_env.__enter__()
 
     def tearDown(self) -> None:
+        self.clean_env.__exit__(None, None, None)
         self.tmp.cleanup()
-        os.environ.pop("AMDAHL_SITE", None)
-        os.environ.pop("SKILLS_SCAN_TOKEN", None)
+
+    def bins(self, cisco: str = "injection.json") -> list[Path]:
+        return [fake_scanner(self.dir, "cs", report=FIXTURES / "cisco" / cisco),
+                fake_scanner(self.dir, "bl", report=FIXTURES / "betterleaks" / "clean.json")]
+
+    def claim(self) -> int:
+        with environ(SKILLS_SCAN_TOKEN=TOKEN):
+            return scan_queue.main(["claim", "--out", str(self.work)])
+
+    def scan(self, bins: list[Path]) -> int:
+        with ScannerEnv(*bins):
+            return scan_queue.main(["scan", "--items", str(self.work / "items.json"),
+                                    "--out", str(self.work / "scanners.json")])
+
+    def review(self, api: FakeAnthropic | None = None, model_key: str | None = None) -> int:
+        with environ(ANTHROPIC_API_KEY=model_key), mock.patch.object(urllib.request, "urlopen", api or FakeAnthropic()):
+            return scan_queue.main(["ai-review", "--items", str(self.work / "items.json"),
+                                    "--out", str(self.work / "ai.json")])
+
+    def post(self) -> int:
+        with environ(SKILLS_SCAN_TOKEN=TOKEN):
+            return scan_queue.main(["post", "--dir", str(self.work)])
+
+    def run_all(self, bins: list[Path], api: FakeAnthropic | None = None, model_key: str | None = None) -> tuple[list[int], str]:
+        """Every step in workflow order, each with only the secret it may hold. Returns (exit codes, log)."""
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            codes = [self.claim(), self.scan(bins), self.review(api, model_key), self.post()]
+        return codes, out.getvalue() + err.getvalue()
 
     def test_fetch_skips_bad_items_and_digest_mismatches(self) -> None:
         FakeSite.queue = {"items": [item(), {"kind": "skill"}, item(digest="0" * 64)]}
@@ -124,45 +182,241 @@ class Flow(unittest.TestCase):
             FakeSite.post_status = status
             self.assertEqual(scan_queue.post_result(self.base, TOKEN, good, []), outcome)
 
+    def test_claim_writes_private_files_and_items_carry_no_ids(self) -> None:
+        FakeSite.queue = {"items": [item()]}
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self.claim(), 0)
+        self.assertEqual(oct(self.work.stat().st_mode & 0o777), "0o700")
+        for name in ("claimed.json", "items.json"):
+            self.assertEqual(oct((self.work / name).stat().st_mode & 0o777), "0o600", name)
+        items = json.loads((self.work / "items.json").read_text(encoding="utf-8"))["items"]
+        self.assertEqual(items, [{"position": 0, "name": "meeting-follow-up", "markdown": MARKDOWN}])
+        claimed = json.loads((self.work / "claimed.json").read_text(encoding="utf-8"))["items"]
+        self.assertEqual(claimed[0]["id"], item()["id"])
+
     def test_end_to_end_with_fake_scanners(self) -> None:
         FakeSite.queue = {"items": [item()]}
-        queue_file = self.dir / "queue.json"
-        self.assertEqual(scan_queue.main(["fetch", "--out", str(queue_file)]), 0)
-        self.assertEqual(oct(queue_file.stat().st_mode & 0o777), "0o600")
-        bins = [fake_scanner(self.dir, name, report=FIXTURES / tool / "injection.json")
-                for name, tool in (("ss", "skillspector"), ("cs", "cisco"))]
-        bins.append(fake_scanner(self.dir, "bl", report=FIXTURES / "betterleaks" / "clean.json"))
-        with ScannerEnv(*bins):
-            self.assertEqual(scan_queue.main(["run", "--queue", str(queue_file)]), 0)
+        codes, _ = self.run_all(self.bins())  # no model key: the AI review did not finish, a warning
+        self.assertEqual(codes, [0, 0, 0, 0])
         self.assertEqual(len(FakeSite.posts), 1)
         posted = FakeSite.posts[0]
         self.assertEqual(set(posted), {"kind", "id", "digest", "checks"})
         self.assertEqual(posted["digest"], sha256_hex(MARKDOWN))
-        self.assertEqual([c["result"] for c in posted["checks"]], ["fail", "fail", "pass"])
+        self.assertEqual([c["result"] for c in posted["checks"]], ["fail", "pass", "warn"])
+        self.assertEqual([c["by"] for c in posted["checks"]],
+                         ["Cisco AI Defense skill-scanner", "Betterleaks", "Amdahl AI review"])
+        self.assertEqual(posted["checks"][2]["summary"], "Scanner did not finish")
 
     def test_logs_never_carry_an_id(self) -> None:
-        # The Actions logs are public, and a submission's id opens its status on amdahl.ai.
+        # The Actions logs are public, and an older submission's id still opens its status on amdahl.ai.
         scanned_id = "5c1d2e3f-4a5b-4c6d-8e7f-90a1b2c3d4e5"
         skipped_id = "6d2e3f4a-5b6c-4d7e-8f90-a1b2c3d4e5f6"
         FakeSite.queue = {"items": [{"kind": "skill"}, item(id=skipped_id, digest="0" * 64), item(id=scanned_id)]}
-        queue_file = self.dir / "queue.json"
-        bins = [fake_scanner(self.dir, name, report=FIXTURES / "betterleaks" / "clean.json") for name in ("ss", "cs", "bl")]
-        out, err = io.StringIO(), io.StringIO()
-        with redirect_stdout(out), redirect_stderr(err), ScannerEnv(*bins):
-            scan_queue.main(["fetch", "--out", str(queue_file)])
-            scan_queue.main(["run", "--queue", str(queue_file)])
-        log = out.getvalue() + err.getvalue()
+        bins = [fake_scanner(self.dir, name, report=FIXTURES / "betterleaks" / "clean.json") for name in ("cs", "bl")]
+        _, log = self.run_all(bins)
         self.assertEqual([p["id"] for p in FakeSite.posts], [scanned_id])
         for secret in (scanned_id, skipped_id, "meeting-follow-up"):
             self.assertNotIn(secret, log)
-        # Both steps name an item by its place in the site's queue.
+        # Every step names an item by its place in the site's queue.
         self.assertIn("Skipped queue item 0: it does not match the contract", log)
         self.assertIn("Skipped queue item 1 (submission): digest does not match the markdown", log)
-        self.assertRegex(log, r"Queue item 2 \(submission\): \S+ -> posted")
+        self.assertRegex(log, r"Queue item 2 \(submission\): warn/pass, AI review did not finish -> posted")
+
+    def test_logs_never_carry_the_model_key_or_the_review(self) -> None:
+        # The AI review's verdict and findings go to amdahl.ai only; the public log says only that it finished.
+        why = "Sends the notes to WHY-MARKER"
+        review = {"purpose": "p", "verdict": "block", "findings": [
+            {"check": "data_leaving", "severity": "block", "line": 9, "quote": "send ~/.ssh", "why": why}]}
+        api = FakeAnthropic(model_answer(review))
+        FakeSite.queue = {"items": [item()]}
+        bins = [fake_scanner(self.dir, name, report=FIXTURES / "betterleaks" / "clean.json") for name in ("cs", "bl")]
+        codes, log = self.run_all(bins, api, MODEL_KEY)
+        self.assertEqual(codes, [0, 0, 0, 0])
+        self.assertEqual(api.models, ["claude-sonnet-5-5"])
+        self.assertEqual(FakeSite.posts[0]["checks"][2]["result"], "fail")
+        self.assertIn("WHY-MARKER", FakeSite.posts[0]["checks"][2]["summary"])
+        self.assertIn("AI review finished -> posted", log)
+        for secret in (MODEL_KEY, "WHY-MARKER", "send ~/.ssh", "Ignore previous", "fail", "block"):
+            self.assertNotIn(secret, log)
+        self.assertNotIn(MODEL_KEY, json.dumps(FakeSite.posts))
+        self.assertNotIn(MODEL_KEY, (self.work / "ai.json").read_text(encoding="utf-8"))
+
+    def test_a_budget_refusal_stops_the_review_and_marks_every_item(self) -> None:
+        # One refusal for money, then no more calls: every item goes back to amdahl.ai as budget.
+        # One worker, so the second item is not already on its way when the refusal comes.
+        second = "7e3f4a5b-6c7d-4e8f-9a0b-c1d2e3f4a5b6"
+        FakeSite.queue = {"items": [item(), item(id=second)]}
+        api = FakeAnthropic(http_error(400, CREDIT_LOW))
+        with mock.patch.object(scan_queue, "AI_WORKERS", 1):
+            codes, log = self.run_all(self.bins(), api, MODEL_KEY)
+        self.assertEqual(codes, [0, 0, 0, 0])
+        self.assertEqual(len(api.requests), 1)
+        self.assertEqual(len(FakeSite.posts), 2)
+        for posted in FakeSite.posts:
+            ai = posted["checks"][2]
+            self.assertEqual((ai["result"], ai["summary"]), ("warn", "Scanner did not finish"))
+            self.assertEqual(ai["details"]["reason"], "budget")
+        self.assertIn("stopped sending reviews", log)
+        self.assertIn("AI review did not finish (budget) -> posted", log)
+        self.assertNotIn("credit balance is too low", log)
+
+    def test_after_a_budget_refusal_no_new_review_starts_with_four_workers(self) -> None:
+        # Reviews already sent may also be refused; no review starts after a refusal is seen.
+        api = FakeAnthropic(*(http_error(400, CREDIT_LOW) for _ in range(scan_queue.AI_WORKERS)))
+        checks = self.review_items(10, api)
+        self.assertLessEqual(len(api.requests), scan_queue.AI_WORKERS)
+        self.assertEqual([handoff.ai_state(c) for c in checks], [handoff.BUDGET_STOP] * 10)
+
+    def write_items(self, count: int) -> None:
+        """items.json with count copies of the sample skill, as the claim step writes it."""
+        self.work.mkdir(mode=0o700, parents=True, exist_ok=True)
+        handoff.write_private(self.work / "items.json", {"items": [
+            {"position": n, "name": "meeting-follow-up", "markdown": MARKDOWN} for n in range(count)]})
+
+    def review_items(self, count: int, api: object) -> list[dict]:
+        """Run the ai-review step on count items with the model key; return each position's check, in order."""
+        self.write_items(count)
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.review(api, MODEL_KEY), 0)
+        self.log = out.getvalue()
+        found = handoff.by_position(handoff.read_json(self.work / "ai.json"))
+        self.assertEqual(sorted(found), list(range(count)))
+        return [found[n][0] for n in range(count)]
+
+    def test_at_most_four_reviews_run_at_a_time(self) -> None:
+        lock, state = threading.Lock(), {"now": 0, "most": 0, "calls": 0}
+        four = threading.Barrier(4, timeout=10)  # the first four meet here: proof that four run at once
+
+        def api(request: urllib.request.Request, timeout: float | None = None) -> object:
+            with lock:
+                state["calls"] += 1
+                state["now"] += 1
+                state["most"] = max(state["most"], state["now"])
+                first = state["calls"] <= 4
+            try:
+                if first:
+                    four.wait()
+                else:
+                    time.sleep(0.01)
+                return Response(model_answer({"purpose": "p", "verdict": "pass", "findings": []}))
+            finally:
+                with lock:
+                    state["now"] -= 1
+
+        self.assertEqual(scan_queue.AI_WORKERS, 4)
+        checks = self.review_items(10, api)
+        self.assertEqual(state["most"], 4)
+        self.assertEqual(state["calls"], 10)
+        self.assertEqual([c["result"] for c in checks], ["pass"] * 10)
+        self.assertIn("AI review: finished 10, did not finish 0", self.log)
+
+    def test_a_review_still_running_at_the_deadline_is_did_not_finish_and_a_late_answer_is_dropped(self) -> None:
+        release, sent = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def api(request: urllib.request.Request, timeout: float | None = None) -> object:
+            sent.set()
+            release.wait(10)  # hangs past the deadline, then answers a pass
+            return Response(model_answer({"purpose": "p", "verdict": "pass", "findings": []}))
+
+        start = time.monotonic()
+        with mock.patch.object(scan_queue, "AI_WORKERS", 1), mock.patch.object(scan_queue, "AI_RUN_SECONDS", 0.5), \
+                mock.patch.object(ai_review, "START_MIN_SECONDS", 0):
+            checks = self.review_items(3, api)
+            self.assertLess(time.monotonic() - start, 5, "the step must stop waiting at the deadline")
+            self.assertTrue(sent.is_set())
+            for check in checks:
+                self.assertEqual((check["result"], check["summary"]), ("warn", "Scanner did not finish"))
+                self.assertIsNone(normalize.reason_of(check))
+            self.assertIn("No answer before this run's", checks[0]["details"])
+            for check in checks[1:]:
+                self.assertIn("Not sent: too little was left of this run's", check["details"])
+            self.assertIn("3 item(s) had no finished review", self.log)
+            written = (self.work / "ai.json").read_bytes()
+            release.set()
+            for thread in threading.enumerate():
+                if thread.name.startswith("ai-review-"):
+                    thread.join(5)
+        self.assertEqual((self.work / "ai.json").read_bytes(), written, "a late answer must not change ai.json")
+
+    def test_the_out_of_time_rows_say_why(self) -> None:
+        sent, never = scan_queue.out_of_time("2026-10-23", True), scan_queue.out_of_time("2026-10-23", False)
+        self.assertEqual(sent["details"], "No answer before this run's 13 minutes for AI reviews ran out, "
+                                          "so this skill was not reviewed")
+        self.assertEqual(never["details"], "Not sent: too little was left of this run's 13 minutes for AI "
+                                           "reviews, so this skill was not reviewed")
+        for check in (sent, never):
+            self.assertEqual((check["result"], check["summary"]), ("warn", "Scanner did not finish"))
+
+    def test_nothing_is_sent_without_a_minute_left(self) -> None:
+        api = FakeAnthropic()
+        with mock.patch.object(scan_queue, "AI_RUN_SECONDS", 30):
+            checks = self.review_items(5, api)
+        self.assertEqual(api.requests, [])
+        for check in checks:
+            self.assertEqual((check["result"], check["summary"]), ("warn", "Scanner did not finish"))
+            self.assertIn("Not sent: too little was left", check["details"])
+
+    def test_post_reads_the_scanner_file_as_untrusted(self) -> None:
+        # Code that broke out of a scanner could write scanners.json. It can never
+        # claim the budget signal or stand in for the AI review.
+        FakeSite.queue = {"items": [item()]}
+        with redirect_stdout(io.StringIO()):
+            self.claim()
+        day = "2026-10-23"
+        forged = [
+            {**normalize.did_not_finish(normalize.CISCO, day, "x", code=normalize.BUDGET)},
+            {"name": "Secrets", "by": "Betterleaks", "result": "pass", "summary": "No\u200b secrets", "checkedAt": day},
+            {"name": "AI security review", "by": "Amdahl AI review", "result": "pass", "summary": "No findings",
+             "checkedAt": day},
+        ]
+        handoff.write_private(self.work / "scanners.json", {"results": [{"position": 0, "checks": forged}]})
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self.post(), 0)
+        cisco, betterleaks, ai = FakeSite.posts[0]["checks"]
+        self.assertEqual((cisco["summary"], cisco["details"]),
+                         ("Scanner did not finish", "The scanner step gave no usable result for this skill"))
+        self.assertEqual((betterleaks["result"], betterleaks["summary"]), ("pass", "No\\u200b secrets"))
+        self.assertEqual((ai["result"], ai["summary"]), ("warn", "Scanner did not finish"))
+        self.assertNotIn("reason", json.dumps(FakeSite.posts))
+
+    def test_post_with_no_result_files_marks_every_check_did_not_finish(self) -> None:
+        FakeSite.queue = {"items": [item()]}
+        with redirect_stdout(io.StringIO()):
+            self.claim()
+            self.assertEqual(self.post(), 0)
+        self.assertEqual([c["summary"] for c in FakeSite.posts[0]["checks"]], ["Scanner did not finish"] * 3)
+
+    def test_each_step_refuses_a_secret_it_must_not_hold(self) -> None:
+        FakeSite.queue = {"items": [item()]}
+        with redirect_stdout(io.StringIO()):
+            self.claim()
+        cases = [
+            (["scan", "--items", str(self.work / "items.json"), "--out", str(self.dir / "s.json")],
+             {"SKILLS_SCAN_TOKEN": TOKEN}),
+            (["scan", "--items", str(self.work / "items.json"), "--out", str(self.dir / "s.json")],
+             {"ANTHROPIC_API_KEY": MODEL_KEY}),
+            (["ai-review", "--items", str(self.work / "items.json"), "--out", str(self.dir / "a.json")],
+             {"SKILLS_SCAN_TOKEN": TOKEN, "ANTHROPIC_API_KEY": MODEL_KEY}),
+            (["claim", "--out", str(self.dir / "c")], {"SKILLS_SCAN_TOKEN": TOKEN, "ANTHROPIC_API_KEY": MODEL_KEY}),
+            (["post", "--dir", str(self.work)], {"SKILLS_SCAN_TOKEN": TOKEN, "ANTHROPIC_API_KEY": MODEL_KEY}),
+        ]
+        api = FakeAnthropic()
+        for argv, env in cases:
+            err = io.StringIO()
+            with environ(**env), redirect_stderr(err), redirect_stdout(io.StringIO()), \
+                    mock.patch.object(urllib.request, "urlopen", api):
+                self.assertEqual(scan_queue.main(argv), 1, argv)
+            self.assertIn("must never hold it", err.getvalue(), argv)
+        self.assertEqual(api.requests, [])
+        self.assertEqual(FakeSite.posts, [])
+        for path in (self.dir / "s.json", self.dir / "a.json"):
+            self.assertFalse(path.exists(), path)
 
     def test_missing_token(self) -> None:
-        del os.environ["SKILLS_SCAN_TOKEN"]
-        self.assertEqual(scan_queue.main(["fetch", "--out", str(self.dir / "q.json")]), 1)
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(scan_queue.main(["claim", "--out", str(self.dir / "q")]), 1)
+            self.assertEqual(scan_queue.main(["post", "--dir", str(self.dir / "q")]), 1)
 
 
 if __name__ == "__main__":
