@@ -9,7 +9,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
+import time
 import unittest
+import urllib.error
 import urllib.request
 from unittest import mock
 
@@ -17,6 +20,7 @@ from support import FakeAnthropic, http_error, model_answer
 
 import ai_review
 import normalize
+import scan_queue
 
 DAY = "2026-10-23"
 KEY = "sk-test-not-a-real-key"
@@ -57,10 +61,11 @@ class Base(unittest.TestCase):
         else:
             os.environ["ANTHROPIC_API_KEY"] = self.saved_key
 
-    def run_review(self, *answers: object, markdown: str = SKILL) -> tuple[dict, FakeAnthropic]:
+    def run_review(self, *answers: object, markdown: str = SKILL,
+                   deadline: float | None = None) -> tuple[dict, FakeAnthropic]:
         api = FakeAnthropic(*answers)
         with mock.patch.object(urllib.request, "urlopen", api):
-            check = ai_review.review(markdown, DAY)
+            check = ai_review.review(markdown, DAY, deadline)
         self.assertEqual(api.answers, [], "every scripted answer should have been used")
         self.assert_shape(check)
         return check, api
@@ -177,16 +182,26 @@ class Request(Base):
         request = api.requests[0]
         self.assertEqual(request["url"], "https://api.anthropic.com/v1/messages")
         self.assertEqual(request["method"], "POST")
-        self.assertEqual(request["timeout"], 60)
+        self.assertEqual(request["timeout"], 300)
         self.assertEqual(request["headers"]["x-api-key"], KEY)
         self.assertEqual(request["headers"]["anthropic-version"], "2023-06-01")
         self.assertEqual(request["headers"]["content-type"], "application/json")
         body = request["body"]
         self.assertEqual(set(body), {"model", "max_tokens", "system", "messages", "output_config"})
         self.assertEqual(body["model"], SONNET)
-        self.assertEqual(body["max_tokens"], 4000)
+        self.assertEqual(body["max_tokens"], 16000)
         self.assertEqual(body["system"], ai_review.SYSTEM_PROMPT)
-        self.assertEqual(body["output_config"], {"format": {"type": "json_schema", "schema": ai_review.RESPONSE_SCHEMA}})
+        self.assertEqual(body["output_config"], {
+            "effort": "medium", "format": {"type": "json_schema", "schema": ai_review.RESPONSE_SCHEMA}})
+
+    def test_effort_is_set_and_thinking_is_the_models_default(self) -> None:
+        # Sonnet 5.5 defaults to effort high, and thinking counts toward max_tokens. No thinking field:
+        # adaptive thinking is the default ("disabled" is a 400 on this model).
+        _, api = self.run_review(model_answer(PASS))
+        body = api.requests[0]["body"]
+        self.assertEqual(body["output_config"]["effort"], ai_review.EFFORT)
+        self.assertEqual(ai_review.EFFORT, "medium")
+        self.assertNotIn("thinking", body)
 
     def test_no_tools_no_sampling_parameters(self) -> None:
         _, api = self.run_review(model_answer(flagged("review", finding(severity="review"))))
@@ -248,14 +263,34 @@ class Failures(Base):
         self.assertEqual(api.models, [SONNET, SONNET])
         self.assertEqual(check["result"], "pass")
 
-    def test_rate_limit_and_timeout_are_retried(self) -> None:
-        check, api = self.run_review(http_error(429), TimeoutError("timed out"))
+    def test_a_rate_limit_is_retried_once(self) -> None:
+        check, api = self.run_review(http_error(429), http_error(429))
         self.assertEqual(api.models, [SONNET, SONNET])
         self.assert_did_not_finish(check)
-        self.assertIn("no answer within 60 seconds", check["details"])
-        check, api = self.run_review(TimeoutError(), TimeoutError())
+        self.assertIn("HTTP 429, after one retry", check["details"])
+
+    def test_a_network_error_is_retried_once(self) -> None:
+        check, api = self.run_review(urllib.error.URLError(ConnectionRefusedError()), model_answer(PASS))
+        self.assertEqual(api.models, [SONNET, SONNET])
+        self.assertEqual(check["result"], "pass")
+
+    def test_a_timeout_is_never_retried(self) -> None:
+        # The timed-out request can still run at Anthropic: a second one could double the cost and the time.
+        for error in (TimeoutError("timed out"), socket.timeout("timed out"), urllib.error.URLError(TimeoutError())):
+            self.sleep.reset_mock()
+            check, api = self.run_review(error)
+            self.assertEqual(api.models, [SONNET], repr(error))
+            self.assert_did_not_finish(check)
+            self.assertIn(f"{SONNET} did not finish: no answer within 300 seconds, and a review that timed out "
+                          "is not sent again", check["details"])
+            self.assertIsNone(normalize.reason_of(check))
+            self.sleep.assert_not_called()
+
+    def test_a_timeout_on_the_retry_ends_the_review(self) -> None:
+        check, api = self.run_review(http_error(529), TimeoutError())
         self.assertEqual(api.models, [SONNET, SONNET])
         self.assert_did_not_finish(check)
+        self.assertIn("no answer within 300 seconds", check["details"])
 
     def test_a_client_error_is_not_retried(self) -> None:
         bad = b'{"type":"error","error":{"type":"invalid_request_error","message":"bad field"}}'
@@ -284,6 +319,8 @@ class Failures(Base):
         for stop in ("max_tokens", "tool_use", "pause_turn", None):
             check, _ = self.run_review(model_answer(PASS, stop_reason=stop))
             self.assert_did_not_finish(check)
+        check, _ = self.run_review(model_answer(PASS, stop_reason="max_tokens"))
+        self.assertIn("the answer did not fit in 16000 tokens, thinking included", check["details"])
 
     def test_answers_that_do_not_match_the_schema_are_did_not_finish(self) -> None:
         bad_answers = {
@@ -312,6 +349,50 @@ class Failures(Base):
         check, _ = self.run_review(http_error(500), http_error(500))
         self.assertIsInstance(check["details"], str)
         self.assertIsNone(normalize.reason_of(check))
+
+
+class Limits(unittest.TestCase):
+    # Made for Claude Sonnet 5.5, whose thinking counts toward max_tokens; a large or adversarial
+    # skill must not run out of tokens or time at the old limits (4000 tokens, 60 seconds).
+
+    def test_the_limits(self) -> None:
+        self.assertEqual(ai_review.MAX_TOKENS, 16000)
+        self.assertEqual(ai_review.EFFORT, "medium")
+        self.assertEqual(ai_review.TIMEOUT_SECONDS, 300)
+        self.assertEqual(ai_review.START_MIN_SECONDS, 60)
+
+    def test_a_full_review_fits_in_the_run(self) -> None:
+        # The run's deadline never cuts the one request a run sends first.
+        self.assertGreaterEqual(scan_queue.AI_RUN_SECONDS, ai_review.TIMEOUT_SECONDS + ai_review.START_MIN_SECONDS)
+
+
+class Deadline(Base):
+    # scan_queue.py gives a run one deadline; one review never runs past it.
+
+    def test_the_timeout_is_cut_to_the_time_left(self) -> None:
+        check, api = self.run_review(model_answer(PASS), deadline=time.monotonic() + 120)
+        self.assertEqual(check["result"], "pass")
+        self.assertLessEqual(api.requests[0]["timeout"], 120)
+        self.assertGreater(api.requests[0]["timeout"], 100)
+
+    def test_far_from_the_deadline_the_timeout_is_the_full_one(self) -> None:
+        _, api = self.run_review(model_answer(PASS), deadline=time.monotonic() + 3600)
+        self.assertEqual(api.requests[0]["timeout"], 300)
+
+    def test_nothing_is_sent_with_less_than_a_minute_left(self) -> None:
+        for left in (59, 0, -10):
+            check, api = self.run_review(deadline=time.monotonic() + left)
+            self.assertEqual(api.requests, [])
+            self.assert_did_not_finish(check)
+            self.assertIn("not sent: less than 60 seconds were left of this run's time", check["details"])
+
+    def test_no_retry_without_a_minute_left_after_the_delay(self) -> None:
+        # The retry waits RETRY_DELAY_SECONDS (5) first; 62 - 5 leaves less than a minute.
+        check, api = self.run_review(http_error(500), deadline=time.monotonic() + 62)
+        self.assertEqual(api.models, [SONNET])
+        self.assert_did_not_finish(check)
+        self.assertIn("HTTP 500, with too little of this run's time left to try again", check["details"])
+        self.sleep.assert_not_called()
 
 
 class Rubric(unittest.TestCase):

@@ -7,6 +7,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 import urllib.request
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
@@ -15,8 +16,9 @@ from pathlib import Path
 from typing import Iterator
 from unittest import mock
 
-from support import FIXTURES, FakeAnthropic, ScannerEnv, fake_scanner, http_error, model_answer
+from support import FIXTURES, FakeAnthropic, Response, ScannerEnv, fake_scanner, http_error, model_answer
 
+import ai_review
 import handoff
 import normalize
 import scan_queue
@@ -241,10 +243,12 @@ class Flow(unittest.TestCase):
 
     def test_a_budget_refusal_stops_the_review_and_marks_every_item(self) -> None:
         # One refusal for money, then no more calls: every item goes back to amdahl.ai as budget.
+        # One worker, so the second item is not already on its way when the refusal comes.
         second = "7e3f4a5b-6c7d-4e8f-9a0b-c1d2e3f4a5b6"
         FakeSite.queue = {"items": [item(), item(id=second)]}
         api = FakeAnthropic(http_error(400, CREDIT_LOW))
-        codes, log = self.run_all(self.bins(), api, MODEL_KEY)
+        with mock.patch.object(scan_queue, "AI_WORKERS", 1):
+            codes, log = self.run_all(self.bins(), api, MODEL_KEY)
         self.assertEqual(codes, [0, 0, 0, 0])
         self.assertEqual(len(api.requests), 1)
         self.assertEqual(len(FakeSite.posts), 2)
@@ -255,6 +259,103 @@ class Flow(unittest.TestCase):
         self.assertIn("stopped sending reviews", log)
         self.assertIn("AI review did not finish (budget) -> posted", log)
         self.assertNotIn("credit balance is too low", log)
+
+    def test_after_a_budget_refusal_no_new_review_starts_with_four_workers(self) -> None:
+        # Reviews already sent may also be refused; no review starts after a refusal is seen.
+        api = FakeAnthropic(*(http_error(400, CREDIT_LOW) for _ in range(scan_queue.AI_WORKERS)))
+        checks = self.review_items(10, api)
+        self.assertLessEqual(len(api.requests), scan_queue.AI_WORKERS)
+        self.assertEqual([handoff.ai_state(c) for c in checks], [handoff.BUDGET_STOP] * 10)
+
+    def write_items(self, count: int) -> None:
+        """items.json with count copies of the sample skill, as the claim step writes it."""
+        self.work.mkdir(mode=0o700, parents=True, exist_ok=True)
+        handoff.write_private(self.work / "items.json", {"items": [
+            {"position": n, "name": "meeting-follow-up", "markdown": MARKDOWN} for n in range(count)]})
+
+    def review_items(self, count: int, api: object) -> list[dict]:
+        """Run the ai-review step on count items with the model key; return each position's check, in order."""
+        self.write_items(count)
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.review(api, MODEL_KEY), 0)
+        self.log = out.getvalue()
+        found = handoff.by_position(handoff.read_json(self.work / "ai.json"))
+        self.assertEqual(sorted(found), list(range(count)))
+        return [found[n][0] for n in range(count)]
+
+    def test_at_most_four_reviews_run_at_a_time(self) -> None:
+        lock, state = threading.Lock(), {"now": 0, "most": 0, "calls": 0}
+        four = threading.Barrier(4, timeout=10)  # the first four meet here: proof that four run at once
+
+        def api(request: urllib.request.Request, timeout: float | None = None) -> object:
+            with lock:
+                state["calls"] += 1
+                state["now"] += 1
+                state["most"] = max(state["most"], state["now"])
+                first = state["calls"] <= 4
+            try:
+                if first:
+                    four.wait()
+                else:
+                    time.sleep(0.01)
+                return Response(model_answer({"purpose": "p", "verdict": "pass", "findings": []}))
+            finally:
+                with lock:
+                    state["now"] -= 1
+
+        self.assertEqual(scan_queue.AI_WORKERS, 4)
+        checks = self.review_items(10, api)
+        self.assertEqual(state["most"], 4)
+        self.assertEqual(state["calls"], 10)
+        self.assertEqual([c["result"] for c in checks], ["pass"] * 10)
+        self.assertIn("AI review: finished 10, did not finish 0", self.log)
+
+    def test_a_review_still_running_at_the_deadline_is_did_not_finish_and_a_late_answer_is_dropped(self) -> None:
+        release, sent = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def api(request: urllib.request.Request, timeout: float | None = None) -> object:
+            sent.set()
+            release.wait(10)  # hangs past the deadline, then answers a pass
+            return Response(model_answer({"purpose": "p", "verdict": "pass", "findings": []}))
+
+        start = time.monotonic()
+        with mock.patch.object(scan_queue, "AI_WORKERS", 1), mock.patch.object(scan_queue, "AI_RUN_SECONDS", 0.5), \
+                mock.patch.object(ai_review, "START_MIN_SECONDS", 0):
+            checks = self.review_items(3, api)
+            self.assertLess(time.monotonic() - start, 5, "the step must stop waiting at the deadline")
+            self.assertTrue(sent.is_set())
+            for check in checks:
+                self.assertEqual((check["result"], check["summary"]), ("warn", "Scanner did not finish"))
+                self.assertIsNone(normalize.reason_of(check))
+            self.assertIn("No answer before this run's", checks[0]["details"])
+            for check in checks[1:]:
+                self.assertIn("Not sent: too little was left of this run's", check["details"])
+            self.assertIn("3 item(s) had no finished review", self.log)
+            written = (self.work / "ai.json").read_bytes()
+            release.set()
+            for thread in threading.enumerate():
+                if thread.name.startswith("ai-review-"):
+                    thread.join(5)
+        self.assertEqual((self.work / "ai.json").read_bytes(), written, "a late answer must not change ai.json")
+
+    def test_the_out_of_time_rows_say_why(self) -> None:
+        sent, never = scan_queue.out_of_time("2026-10-23", True), scan_queue.out_of_time("2026-10-23", False)
+        self.assertEqual(sent["details"], "No answer before this run's 13 minutes for AI reviews ran out, "
+                                          "so this skill was not reviewed")
+        self.assertEqual(never["details"], "Not sent: too little was left of this run's 13 minutes for AI "
+                                           "reviews, so this skill was not reviewed")
+        for check in (sent, never):
+            self.assertEqual((check["result"], check["summary"]), ("warn", "Scanner did not finish"))
+
+    def test_nothing_is_sent_without_a_minute_left(self) -> None:
+        api = FakeAnthropic()
+        with mock.patch.object(scan_queue, "AI_RUN_SECONDS", 30):
+            checks = self.review_items(5, api)
+        self.assertEqual(api.requests, [])
+        for check in checks:
+            self.assertEqual((check["result"], check["summary"]), ("warn", "Scanner did not finish"))
+            self.assertIn("Not sent: too little was left", check["details"])
 
     def test_post_reads_the_scanner_file_as_untrusted(self) -> None:
         # Code that broke out of a scanner could write scanners.json. It can never

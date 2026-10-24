@@ -13,6 +13,9 @@ import unittest
 
 from support import TESTS
 
+import ai_review
+import scan_queue
+
 WORKFLOWS = TESTS.parent / ".github" / "workflows"
 SANDBOX = TESTS.parent / "scripts" / "sandbox.sh"
 
@@ -234,6 +237,34 @@ class SelfTest(unittest.TestCase):
         for path in WORKFLOWS.glob("*.yml"):
             if path.name not in ("scan-queue.yml", "self-test.yml"):
                 self.assertNotIn("ANTHROPIC", path.read_text(encoding="utf-8"), path.name)
+
+
+def step_minutes(body: str) -> int:
+    """A step's timeout-minutes."""
+    found = re.findall(r"(?m)^        timeout-minutes: (\d+)$", body)
+    if len(found) != 1:
+        raise AssertionError(f"expected one timeout-minutes, found {len(found)}")
+    return int(found[0])
+
+
+class AiReviewTime(unittest.TestCase):
+    # The ai-review step stops waiting at scan_queue.AI_RUN_SECONDS, so GitHub never kills it first:
+    # an item with no review then gets the did-not-finish row from the script, never a pass.
+
+    def test_the_run_deadline_leaves_room_in_each_ai_review_step(self) -> None:
+        for name in ("scan-queue.yml", "self-test.yml"):
+            body = steps(read(name))["AI security review"]
+            self.assertIn("scan_queue.py ai-review --items", body, name)
+            self.assertGreaterEqual(step_minutes(body) * 60 - scan_queue.AI_RUN_SECONDS, 120, name)
+
+    def test_one_full_review_fits_before_the_deadline(self) -> None:
+        self.assertGreaterEqual(scan_queue.AI_RUN_SECONDS, ai_review.TIMEOUT_SECONDS + ai_review.START_MIN_SECONDS)
+
+    def test_the_scan_job_has_room_for_every_step(self) -> None:
+        text = read("scan-queue.yml")
+        job = int(re.findall(r"(?m)^    timeout-minutes: (\d+)$", text)[0])
+        self.assertLessEqual(sum(step_minutes(body) for body in steps(text).values()
+                                 if "timeout-minutes:" in body), job)
 
 
 class Sandbox(unittest.TestCase):

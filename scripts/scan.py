@@ -122,12 +122,15 @@ def run_scanner(command: list[str], out: Path, ok_codes: set[int], env: dict[str
         return RunResult(error=f"Could not read the report: {error}")
 
 
-def review_markdown(markdown: str, checked_at: str) -> dict[str, Any]:
-    """The AI security review of one SKILL.md text. Never raises: a crash is a check that did not finish."""
+def review_markdown(markdown: str, checked_at: str, deadline: float | None = None) -> dict[str, Any]:
+    """The AI security review of one SKILL.md text. Never raises: a crash is a check that did not finish.
+
+    deadline is a time.monotonic() value that bounds the request (ai_review.call_api).
+    """
     if len(markdown.encode("utf-8")) > MARKDOWN_MAX_BYTES:
         return normalize.did_not_finish(normalize.AI_REVIEW, checked_at, "SKILL.md is larger than 1 MB, so it was not reviewed")
     try:
-        return ai_review.review(markdown, checked_at)
+        return ai_review.review(markdown, checked_at, deadline)
     except Exception as error:  # noqa: BLE001 - a bug here must cost one warning, never a pass or the whole queue
         return normalize.did_not_finish(normalize.AI_REVIEW, checked_at, f"The AI review crashed: {type(error).__name__}")
 

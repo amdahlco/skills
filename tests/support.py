@@ -7,6 +7,7 @@ import json
 import os
 import stat
 import sys
+import threading
 import urllib.error
 import urllib.request
 from email.message import Message
@@ -98,7 +99,9 @@ def http_error(code: int, body: bytes = b"") -> urllib.error.HTTPError:
     return urllib.error.HTTPError("https://api.anthropic.com/v1/messages", code, "error", Message(), io.BytesIO(body))
 
 
-class _Response:
+class Response:
+    """What urlopen returns for HTTP 200: the payload as JSON bytes."""
+
     def __init__(self, payload: dict) -> None:
         self.status = 200
         self._raw = json.dumps(payload).encode("utf-8")
@@ -106,7 +109,7 @@ class _Response:
     def read(self, limit: int = -1) -> bytes:
         return self._raw if limit < 0 else self._raw[:limit]
 
-    def __enter__(self) -> "_Response":
+    def __enter__(self) -> "Response":
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -119,30 +122,33 @@ class FakeAnthropic:
     Each scripted answer is a payload dict (HTTP 200) or an exception to raise
     (an HTTPError, a TimeoutError). Nothing reaches the Anthropic API. A request
     to any other URL (the local fake site in test_scan_queue) goes to the real
-    urlopen.
+    urlopen. Safe to call from several threads (the ai-review step's workers):
+    each request takes the next answer.
     """
 
     def __init__(self, *answers: object) -> None:
         self.answers = list(answers)
         self.requests: list[dict] = []
         self._real_urlopen = urllib.request.urlopen
+        self._lock = threading.Lock()
 
     def __call__(self, request: urllib.request.Request, timeout: float | None = None) -> object:
         if not request.full_url.startswith("https://api.anthropic.com/"):
             return self._real_urlopen(request, timeout=timeout)
-        self.requests.append({
-            "url": request.full_url,
-            "method": request.get_method(),
-            "headers": {key.lower(): value for key, value in request.header_items()},
-            "body": json.loads(request.data),
-            "timeout": timeout,
-        })
-        if not self.answers:
-            raise AssertionError("the fake API got more requests than it has answers")
-        answer = self.answers.pop(0)
+        with self._lock:
+            self.requests.append({
+                "url": request.full_url,
+                "method": request.get_method(),
+                "headers": {key.lower(): value for key, value in request.header_items()},
+                "body": json.loads(request.data),
+                "timeout": timeout,
+            })
+            if not self.answers:
+                raise AssertionError("the fake API got more requests than it has answers")
+            answer = self.answers.pop(0)
         if isinstance(answer, BaseException):
             raise answer
-        return _Response(answer)
+        return Response(answer)
 
     @property
     def models(self) -> list[str]:

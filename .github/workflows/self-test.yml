@@ -2,8 +2,9 @@
 # it: the unit tests (no network, no secrets), then the two pinned scanners
 # installed and run as the unprivileged scanner user exactly as scan-queue.yml
 # does (scripts/sandbox.sh), on a clean skill, a skill with hidden
-# instructions and a skill with a secret (made at run time). Each verdict is
-# checked against the one it must get (scripts/self_test.py check).
+# instructions, a skill with a secret (made at run time), a benign skill of
+# about 60 KB and a skill that loads its steps from a URL while it runs. Each
+# verdict is checked against the one it must get (scripts/self_test.py check).
 #
 # The AI review runs on the same samples in its own step, the only step that
 # gets the SKILLS_REVIEW_ANTHROPIC_KEY secret, and only when the secret is there
@@ -34,7 +35,8 @@ jobs:
   self-test:
     name: Scanners give the right verdicts
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Room for every step's own limit (10 + 2 + 12 + 15 minutes) plus setup.
+    timeout-minutes: 45
     defaults:
       run:
         shell: /usr/bin/bash --noprofile --norc -eo pipefail {0}
@@ -71,7 +73,7 @@ jobs:
         run: bash scripts/sandbox.sh scan "$RUNNER_TEMP/self-test/items.json" "$RUNNER_TEMP/self-test/scanners.json"
 
       - name: AI security review
-        timeout-minutes: 8
+        timeout-minutes: 15
         env:
           ANTHROPIC_API_KEY: ${{ secrets.SKILLS_REVIEW_ANTHROPIC_KEY }}
         run: /usr/bin/python3 -I -S scripts/scan_queue.py ai-review --items "$RUNNER_TEMP/self-test/items.json" --out "$RUNNER_TEMP/self-test/ai.json"

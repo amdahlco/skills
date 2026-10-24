@@ -15,6 +15,15 @@ The model reads the whole SKILL.md or none of it. A SKILL.md larger than
 MODEL_INPUT_MAX_BYTES (64 KB of UTF-8, amdahl.ai's own SKILL.md limit) is never
 cut to fit: the check did not finish, and its details say why.
 
+The request sets effort to EFFORT ("medium") and sends no thinking field, so
+the model runs its default adaptive thinking (Claude Sonnet 5.5's default
+effort is "high"). Thinking counts toward MAX_TOKENS. The HTTP timeout is
+TIMEOUT_SECONDS. A 429, a 5xx or a network error gets one retry; a timeout
+gets none, because the first request can still run at Anthropic, and a second
+one could double the cost and the time. With a deadline (scan_queue.py gives
+the run one), no request starts with less than START_MIN_SECONDS left, and the
+timeout is cut to the time left.
+
 The API key comes from ANTHROPIC_API_KEY. No key, an HTTP error after one
 retry, a timeout, a refusal or an answer that does not match the schema means
 the check did not finish (a warning). A check never passes by default.
@@ -37,6 +46,7 @@ import http.client
 import json
 import os
 import re
+import socket
 import sys
 import time
 import urllib.error
@@ -54,8 +64,15 @@ MODEL = "claude-sonnet-5-5"
 # The largest SKILL.md the model reads, in bytes of UTF-8. Must equal SKILL_MAX_BYTES
 # in amdahl.ai's lib/skills/gate.ts, so that every SKILL.md the site accepts is read whole.
 MODEL_INPUT_MAX_BYTES = 64 * 1024
-MAX_TOKENS = 4000
-TIMEOUT_SECONDS = 60
+# Thinking counts toward max_tokens. 16000 leaves room for medium-effort thinking on a 64 KB
+# SKILL.md and the JSON verdict after it.
+MAX_TOKENS = 16000
+# output_config.effort. Claude Sonnet 5.5 defaults to "high"; medium bounds the thinking, so an
+# answer fits MAX_TOKENS and TIMEOUT_SECONDS. There is no thinking field: adaptive is the default.
+EFFORT = "medium"
+TIMEOUT_SECONDS = 300
+# No request (first or retry) starts with less than this many seconds left before a run's deadline.
+START_MIN_SECONDS = 60
 RETRY_DELAY_SECONDS = 5
 RETRY_AFTER_MAX_SECONDS = 30
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -176,15 +193,15 @@ def user_message(markdown: str) -> str:
 def request_body(model: str, prompt: str) -> dict[str, Any]:
     """The Messages API request: rubric as system, skill only in the user turn, no tools, JSON schema output.
 
-    No temperature, top_p or top_k, and no thinking field: the models run their
-    default adaptive thinking.
+    No temperature, top_p or top_k, and no thinking field: the model runs its
+    default adaptive thinking, at effort EFFORT (output_config.effort).
     """
     return {
         "model": model,
         "max_tokens": MAX_TOKENS,
         "system": SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": prompt}],
-        "output_config": {"format": {"type": "json_schema", "schema": RESPONSE_SCHEMA}},
+        "output_config": {"effort": EFFORT, "format": {"type": "json_schema", "schema": RESPONSE_SCHEMA}},
     }
 
 
@@ -258,14 +275,26 @@ def _retry_delay(headers: Any) -> float:
     return min(value, RETRY_AFTER_MAX_SECONDS)
 
 
-def call_api(body: dict[str, Any], api_key: str) -> dict[str, Any]:
-    """POST one request. One retry on 429, 5xx, a timeout or a network error. Returns the parsed JSON.
+def seconds_left(deadline: float | None) -> float:
+    """Seconds until deadline (a time.monotonic() value); no deadline is no limit."""
+    return float("inf") if deadline is None else deadline - time.monotonic()
 
-    A refusal for money raises BudgetError at once, with no retry.
+
+def call_api(body: dict[str, Any], api_key: str, deadline: float | None = None) -> dict[str, Any]:
+    """POST one request. One retry on 429, 5xx or a network error. Returns the parsed JSON.
+
+    A timeout is never retried: the request can still run at Anthropic, and a
+    second one could double the cost and the time. A refusal for money raises
+    BudgetError at once, with no retry. With a deadline, no request starts with
+    less than START_MIN_SECONDS left, and the timeout is cut to the time left.
     """
     data = json.dumps(body, ensure_ascii=True).encode("utf-8")
     problem = ""
     for attempt in (1, 2):
+        left = seconds_left(deadline)
+        if left < START_MIN_SECONDS:
+            raise ReviewError(f"not sent: less than {START_MIN_SECONDS} seconds were left of this run's time")
+        timeout = min(TIMEOUT_SECONDS, left)
         request = urllib.request.Request(API_URL, data=data, method="POST")
         request.add_header("x-api-key", api_key)
         request.add_header("anthropic-version", ANTHROPIC_VERSION)
@@ -273,7 +302,7 @@ def call_api(body: dict[str, Any], api_key: str) -> dict[str, Any]:
         request.add_header("user-agent", USER_AGENT)
         headers: Any = None
         try:
-            with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 status, raw = response.status, response.read(MAX_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as error:
             status, headers = error.code, error.headers
@@ -285,13 +314,14 @@ def call_api(body: dict[str, Any], api_key: str) -> dict[str, Any]:
             problem = f"HTTP {status}" + (f" ({detail})" if detail else "")
             if is_budget_refusal(status, raw):
                 raise BudgetError(f"Anthropic refused for the spend limit, the credit balance or billing: {problem}") from None
-        except TimeoutError:
-            status, problem = 0, f"no answer within {TIMEOUT_SECONDS} seconds"
+        except (TimeoutError, socket.timeout):  # the same class from Python 3.10 on
+            raise ReviewError(_timed_out(timeout)) from None
         except urllib.error.URLError as error:
             status = 0
             reason = getattr(error, "reason", error)
-            problem = (f"no answer within {TIMEOUT_SECONDS} seconds" if isinstance(reason, TimeoutError)
-                       else f"network error: {normalize.clean_text(reason, 120)}")
+            if isinstance(reason, (TimeoutError, socket.timeout)):
+                raise ReviewError(_timed_out(timeout)) from None
+            problem = f"network error: {normalize.clean_text(reason, 120)}"
         except (OSError, http.client.HTTPException) as error:
             status, problem = 0, f"network error: {normalize.clean_text(type(error).__name__, 60)}"
         if status == 200:
@@ -307,8 +337,15 @@ def call_api(body: dict[str, Any], api_key: str) -> dict[str, Any]:
         if status not in (0, 429) and status < 500:
             raise ReviewError(problem or f"HTTP {status}")
         if attempt == 1:
-            time.sleep(_retry_delay(headers))
+            delay = _retry_delay(headers)
+            if seconds_left(deadline) - delay < START_MIN_SECONDS:
+                raise ReviewError(f"{problem}, with too little of this run's time left to try again")
+            time.sleep(delay)
     raise ReviewError(f"{problem}, after one retry")
+
+
+def _timed_out(timeout: float) -> str:
+    return f"no answer within {int(timeout)} seconds, and a review that timed out is not sent again"
 
 
 def _valid_line(value: object, line_count: int) -> int | None:
@@ -325,7 +362,7 @@ def parse_review(payload: dict[str, Any], line_count: int) -> dict[str, Any]:
     if stop == "refusal":
         raise ReviewError("the model declined to review (stop_reason refusal)")
     if stop == "max_tokens":
-        raise ReviewError(f"the answer did not fit in {MAX_TOKENS} tokens")
+        raise ReviewError(f"the answer did not fit in {MAX_TOKENS} tokens, thinking included")
     if stop != "end_turn":
         raise ReviewError(f"unexpected stop_reason {normalize.clean_text(stop, 40)}")
     content = payload.get("content")
@@ -356,9 +393,10 @@ def parse_review(payload: dict[str, Any], line_count: int) -> dict[str, Any]:
     return {"purpose": review["purpose"], "verdict": review["verdict"], "findings": findings}
 
 
-def run_model(model: str, prompt: str, api_key: str, line_count: int) -> dict[str, Any]:
+def run_model(model: str, prompt: str, api_key: str, line_count: int,
+              deadline: float | None = None) -> dict[str, Any]:
     """One review by one model. Raises ReviewError."""
-    return parse_review(call_api(request_body(model, prompt), api_key), line_count)
+    return parse_review(call_api(request_body(model, prompt), api_key, deadline), line_count)
 
 
 def budget_check(checked_at: str, text: str) -> dict[str, Any]:
@@ -373,10 +411,11 @@ def too_large_reason(size: int) -> str:
             "of one, so it did not review this file.")
 
 
-def review(markdown: str, checked_at: str) -> dict[str, Any]:
+def review(markdown: str, checked_at: str, deadline: float | None = None) -> dict[str, Any]:
     """Review one SKILL.md with MODEL and return the 'AI security review' check. Never raises ReviewError.
 
     A SKILL.md over MODEL_INPUT_MAX_BYTES is not sent at all: the check did not finish.
+    deadline (a time.monotonic() value) bounds the request; see call_api.
     """
     size = len(markdown.encode("utf-8"))
     if size > MODEL_INPUT_MAX_BYTES:
@@ -387,7 +426,7 @@ def review(markdown: str, checked_at: str) -> dict[str, Any]:
     prompt = user_message(markdown)
     line_count = len(skill_lines(markdown))
     try:
-        verdict = run_model(MODEL, prompt, api_key, line_count)
+        verdict = run_model(MODEL, prompt, api_key, line_count, deadline)
     except BudgetError as error:
         return budget_check(checked_at, f"{MODEL}: {error}")
     except ReviewError as error:

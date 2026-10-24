@@ -10,6 +10,10 @@ Usage, one subcommand per step of .github/workflows/scan-queue.yml, in this orde
 steps pass files to each other in one private folder, never as workflow
 artifacts; scripts/handoff.py names the files and reads them back strictly.
 
+`ai-review` runs at most AI_WORKERS reviews at a time, and stops waiting
+AI_RUN_SECONDS after it starts, inside the step's timeout-minutes. An item with
+no finished review by then gets the "did not finish" row, never a pass.
+
 Environment:
     AMDAHL_SITE        base URL, default https://amdahl.ai (https only; http
                        is accepted for localhost so the flow can be tested)
@@ -34,7 +38,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -44,6 +50,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # works under `python3 -I` too
 
 import handoff  # noqa: E402
+import normalize  # noqa: E402
 from skillmd import DIGEST_RE, UUID_RE, is_valid_name, sha256_hex  # noqa: E402
 
 DEFAULT_SITE = "https://amdahl.ai"
@@ -53,6 +60,10 @@ MAX_ITEMS = 20
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 HTTP_TIMEOUT_SECONDS = 30
 SCAN_TIMEOUT_SECONDS = 180  # per scanner run, in the queue
+AI_WORKERS = 4  # at most this many AI reviews at a time
+# The AI review step stops waiting this long after it starts. The "AI security review" step has
+# timeout-minutes 15 in scan-queue.yml and self-test.yml, so 2 minutes are left to write ai.json.
+AI_RUN_SECONDS = 13 * 60
 USER_AGENT = "amdahl-skills-scanner (+https://github.com/amdahlco/skills)"
 
 TOKEN, MODEL_KEY = "SKILLS_SCAN_TOKEN", "ANTHROPIC_API_KEY"
@@ -244,39 +255,115 @@ def cmd_scan(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_ai_review(args: argparse.Namespace) -> int:
-    """Step 3: the AI security review of every item. Holds the model key, never the token.
+def not_sent_budget(day: str) -> dict:
+    """The row of an item not sent because Anthropic refused an earlier review for money."""
+    import ai_review
 
-    After a budget refusal no further item is sent: each one gets the same
-    did-not-finish row with details.reason 'budget', and amdahl.ai queues them all again.
+    return ai_review.budget_check(
+        day, "Not sent: Anthropic refused an earlier review in this run for the spend limit, "
+             "the credit balance or billing")
+
+
+def out_of_time(day: str, sent: bool) -> dict:
+    """The row of an item with no finished review when the run's time for AI reviews ran out."""
+    minutes = AI_RUN_SECONDS // 60
+    text = (f"No answer before this run's {minutes} minutes for AI reviews ran out" if sent else
+            f"Not sent: too little was left of this run's {minutes} minutes for AI reviews")
+    return normalize.did_not_finish(normalize.AI_REVIEW, day, text + ", so this skill was not reviewed")
+
+
+def review_all(items: list[dict], out: Path, keyed: bool, deadline: float) -> tuple[list[dict], int]:
+    """The AI review check of every item, in order, and how many ran out of time.
+
+    AI_WORKERS threads take items in turn; ai.json is rewritten after each
+    review. After a budget refusal no further item is sent (reviews already
+    sent finish as they will). At the deadline this stops waiting: an item
+    with no finished review gets the out_of_time row, and a review that ends
+    later is dropped. The threads are daemons, so none holds the step open.
     """
-    refuse_secrets("ai-review")
     import ai_review
     import scan
 
+    checks: list[dict | None] = [None] * len(items)
+    started = [False] * len(items)
+    todo: queue.SimpleQueue = queue.SimpleQueue()
+    for index in range(len(items)):
+        todo.put(index)
+    lock, all_done = threading.Lock(), threading.Event()
+    state = {"budget": False, "closed": False, "late": 0}
+
+    def save() -> None:  # with lock held
+        results = [{"position": item["position"], "checks": [check]}
+                   for item, check in zip(items, checks) if check is not None]
+        handoff.write_private(out, {"keyed": keyed, "results": results})
+
+    def finish(index: int, check: dict, late: bool = False) -> None:
+        with lock:
+            if state["closed"]:
+                return
+            checks[index] = check
+            state["budget"] = state["budget"] or handoff.ai_state(check) == handoff.BUDGET_STOP
+            state["late"] += late
+            save()
+            if all(c is not None for c in checks):
+                all_done.set()
+
+    def work() -> None:
+        while True:
+            try:
+                index = todo.get_nowait()
+            except queue.Empty:
+                return
+            day = handoff.today_utc()
+            with lock:
+                budget = state["budget"]
+            if budget:
+                finish(index, not_sent_budget(day))
+            elif ai_review.seconds_left(deadline) < ai_review.START_MIN_SECONDS:
+                finish(index, out_of_time(day, sent=False), late=True)
+            else:
+                started[index] = True
+                finish(index, scan.review_markdown(items[index]["markdown"], day, deadline))
+
+    with lock:
+        save()
+    if not items:
+        all_done.set()
+    for number in range(min(AI_WORKERS, len(items))):
+        threading.Thread(target=work, name=f"ai-review-{number + 1}", daemon=True).start()
+    all_done.wait(max(0.0, ai_review.seconds_left(deadline)))
+    with lock:
+        state["closed"] = True
+        for index, check in enumerate(checks):
+            if check is None:
+                checks[index] = out_of_time(handoff.today_utc(), sent=started[index])
+                state["late"] += 1
+        save()
+        return [check for check in checks if check is not None], state["late"]
+
+
+def cmd_ai_review(args: argparse.Namespace) -> int:
+    """Step 3: the AI security review of every item. Holds the model key, never the token.
+
+    At most AI_WORKERS reviews run at a time, and the step stops waiting
+    AI_RUN_SECONDS after it starts (review_all). After a budget refusal no
+    further item is sent: each one gets the same did-not-finish row with
+    details.reason 'budget', and amdahl.ai queues them all again.
+    """
+    refuse_secrets("ai-review")
+    deadline = time.monotonic() + AI_RUN_SECONDS
     keyed = bool(os.environ.get(MODEL_KEY, "").strip())
-    results: list[dict] = []
-    handoff.write_private(args.out, {"keyed": keyed, "results": results})
+    checks, late = review_all(_items(args.items), args.out, keyed, deadline)
     tally = {handoff.FINISHED: 0, handoff.NOT_FINISHED: 0, handoff.BUDGET_STOP: 0}
-    stopped = False
-    for item in _items(args.items):
-        day = handoff.today_utc()
-        if stopped:
-            check = ai_review.budget_check(
-                day, "Not sent: Anthropic refused an earlier review in this run for the spend limit, "
-                     "the credit balance or billing")
-        else:
-            check = scan.review_markdown(item["markdown"], day)
-        state = handoff.ai_state(check)
-        stopped = stopped or state == handoff.BUDGET_STOP
-        tally[state] += 1
-        results.append({"position": item["position"], "checks": [check]})
-        handoff.write_private(args.out, {"keyed": keyed, "results": results})
+    for check in checks:
+        tally[handoff.ai_state(check)] += 1
     if not keyed:
         print("AI review: ANTHROPIC_API_KEY is not set, so no item was reviewed")
     print("AI review: " + ", ".join(f"{key} {value}" for key, value in tally.items()))
-    if stopped:
+    if tally[handoff.BUDGET_STOP]:
         print("AI review: stopped sending reviews. Anthropic refused for the spend limit, the credit balance or billing.")
+    if late:
+        print(f"AI review: {late} item(s) had no finished review when the run's {AI_RUN_SECONDS // 60} minutes ran out")
     return 0
 
 
