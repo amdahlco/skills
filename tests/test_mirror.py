@@ -218,6 +218,16 @@ class Guards(unittest.TestCase):
             mirror.check_guards({("a", "b")}, {}, allow_mass_removal=False)
         mirror.check_guards({("a", "b")}, {}, allow_mass_removal=True)
 
+    def test_folder_only_catalog_removes_the_stale_copy(self) -> None:
+        # The catalog listed only a folder skill (never mirrored, so `wanted` is empty), and the
+        # guard mistook that for an outage and refused to remove the one stale copy. A catalog
+        # that loaded, even if it only lists folder skills, is not an outage.
+        mirror.check_guards({("amdahl", "system-diagram")}, {}, allow_mass_removal=False, folder_skills=1)
+
+    def test_truly_empty_catalog_still_refused(self) -> None:
+        with self.assertRaises(mirror.MirrorError):
+            mirror.check_guards({("a", "b")}, {}, allow_mass_removal=False, folder_skills=0)
+
     def test_half_limit(self) -> None:
         existing = {("p", f"s{i}") for i in range(20)}
         keep_nine = {key: "" for key in list(sorted(existing))[:9]}
@@ -229,6 +239,14 @@ class Guards(unittest.TestCase):
     def test_small_mirror_may_lose_five(self) -> None:
         existing = {("p", f"s{i}") for i in range(6)}
         mirror.check_guards(existing, {("p", "s0"): ""}, allow_mass_removal=False)
+
+    def test_folder_skills_do_not_raise_the_half_limit(self) -> None:
+        # folder_skills only excuses an empty `wanted`; it must not let a run keep more than
+        # half of the mirror just because some of the catalog entries were folder skills.
+        existing = {("p", f"s{i}") for i in range(20)}
+        keep_nine = {key: "" for key in list(sorted(existing))[:9]}
+        with self.assertRaises(mirror.MirrorError):
+            mirror.check_guards(existing, keep_nine, allow_mass_removal=False, folder_skills=3)
 
 
 if __name__ == "__main__":
