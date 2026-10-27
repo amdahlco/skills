@@ -122,6 +122,25 @@ def expected_skills(payload: object) -> dict[tuple[str, str], str]:
     return wanted
 
 
+def folder_skill_count(payload: object) -> int:
+    """How many catalog entries are valid folder skills.
+
+    A folder skill is never mirrored (see expected_skills), so it is absent from `wanted`
+    either way. check_guards uses this count to tell a catalog that loaded but lists only
+    folder skills from one that failed to load at all.
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get("skills"), list):
+        return 0
+    return sum(
+        1
+        for entry in payload["skills"]
+        if isinstance(entry, dict)
+        and entry.get("kind") == "folder"
+        and is_valid_name(entry.get("publisher"))
+        and is_valid_name(entry.get("name"))
+    )
+
+
 def install_note(base: str, publisher: str, name: str) -> str:
     """The README.md beside a mirrored SKILL.md: how to install the skill from the site it mirrors."""
     site = "" if base == DEFAULT_SITE else f" --site {base}"
@@ -160,12 +179,17 @@ def existing_skills(root: Path) -> set[tuple[str, str]]:
     return found
 
 
-def check_guards(existing: set, wanted: dict, allow_mass_removal: bool) -> None:
-    """Refuse an empty catalog or a large removal unless explicitly allowed."""
+def check_guards(existing: set, wanted: dict, allow_mass_removal: bool, folder_skills: int = 0) -> None:
+    """Refuse an empty catalog or a large removal unless explicitly allowed.
+
+    A catalog holding only folder skills yields an empty `wanted` too, but it loaded fine;
+    the mirror just doesn't carry folder skills (see expected_skills). Only a catalog that
+    lists nothing at all is refused as a likely outage.
+    """
     if allow_mass_removal:
         return
     removals = len(existing - set(wanted))
-    if existing and not wanted:
+    if existing and not wanted and not folder_skills:
         raise MirrorError("the catalog is empty but the mirror is not; refusing to remove every skill")
     limit = max(MIN_FREE_REMOVALS, len(existing) // 2)
     if removals > limit:
@@ -239,8 +263,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         base = site_base(os.environ.get("AMDAHL_SITE"))
-        wanted = expected_skills(fetch_catalog(base))
-        check_guards(existing_skills(args.root), wanted, args.allow_mass_removal)
+        payload = fetch_catalog(base)
+        wanted = expected_skills(payload)
+        check_guards(existing_skills(args.root), wanted, args.allow_mass_removal, folder_skills=folder_skill_count(payload))
     except Exception as error:  # noqa: BLE001 - one clear line, never a partial write
         print(f"Error: {error}", file=sys.stderr)
         return 1
