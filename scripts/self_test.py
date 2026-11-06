@@ -16,7 +16,9 @@ Samples:
   clean      tests/fixtures/inputs/discovery-call-notes.md: every check passes.
   injection  tests/fixtures/inputs/meeting-follow-up.md: hidden text telling the
              agent to send ~/.ssh away; Cisco skill-scanner and the AI review
-             must fail it.
+             must fail it. The AI review fails it with a block verdict, or
+             when the model declines to review it (a refusal also fails, and
+             the log says so).
   secret     a GitHub token shape built at run time (never committed, so no
              real or fake secret sits in this repo): Betterleaks and the AI
              review must not pass it.
@@ -210,6 +212,15 @@ def from_model(check: dict) -> bool:
     return head.startswith("Verdict: ") and f", from {ai_review.MODEL}." in head
 
 
+def refusal_note(check: dict) -> str | None:
+    """The line normalize.refused_ai_review writes after the head, when the model refused; otherwise None."""
+    details = check.get("details")
+    if not isinstance(details, str) or not details.startswith("Verdict: refused, "):
+        return None
+    lines = details.split("\n")
+    return lines[1] if len(lines) > 1 else "no reason given"
+
+
 def lists_finding(check: dict, check_id: str) -> bool:
     """True when a finished AI review check lists a finding of check_id (normalize_ai_review's details lines)."""
     details = check.get("details")
@@ -230,6 +241,9 @@ def failures(checks_by_sample: dict[str, list[dict]], ai_enabled: bool) -> list[
         by = {c["by"]: c for c in checks}
         print(f"{name}: " + ", ".join(f"{c['by']}={c['result']}" for c in checks))
         for check in checks:
+            note = refusal_note(check) if check["by"] == AI else None
+            if note:
+                print(f"{name}: {AI} gave fail because the model refused: {note}")
             if check["by"] == AI and not ai_enabled:
                 if (check["result"], check["summary"]) != ("warn", normalize.DID_NOT_FINISH):
                     found.append(f"{name}: {AI} gave {check['result']} with no key, expected did not finish")

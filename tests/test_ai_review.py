@@ -306,14 +306,47 @@ class Failures(Base):
             self.assert_did_not_finish(check)
             self.assertIn("not JSON", check["details"])
 
-    def test_refusal_is_did_not_finish(self) -> None:
-        empty = {**model_answer(PASS), "content": [], "stop_reason": "refusal"}
-        check, _ = self.run_review(empty)
-        self.assert_did_not_finish(check)
-        self.assertIn("refusal", check["details"])
-        # A refusal after partial output is never read, even when the text looks like a pass.
+    def test_refusal_fails_closed(self) -> None:
+        # A skill the reviewer will not even read is not safe to publish: a refusal is a fail,
+        # never a did-not-finish warning that amdahl.ai would queue again.
+        refused = {**model_answer(PASS), "content": [], "stop_reason": "refusal",
+                   "stop_details": {"type": "refusal", "category": "cyber", "explanation": "x"}}
+        check, api = self.run_review(refused)
+        self.assertEqual(api.models, [SONNET])
+        self.assertEqual((check["result"], check["summary"]), ("fail", normalize.REFUSED_SUMMARY))
+        self.assertIsInstance(check["details"], str)
+        self.assertIsNone(normalize.reason_of(check))
+        head, why = check["details"].split("\n")
+        self.assertEqual(head, f"Verdict: refused, from {SONNET}. The model saw only the SKILL.md text, with no tools.")
+        self.assertIn("stop_reason refusal, category cyber", why)
+        self.sleep.assert_not_called()  # one request, no retry
+
+    def test_a_refusal_after_partial_output_is_never_read(self) -> None:
+        # Even when the text before the refusal looks like a pass, or quotes the skill.
         check, _ = self.run_review(model_answer(PASS, stop_reason="refusal"))
-        self.assert_did_not_finish(check)
+        self.assertEqual(check["result"], "fail")
+        self.assertNotIn(MARKER, json.dumps(check))
+        check, _ = self.run_review(model_answer(text=f'{{"purpose": "{MARKER}", "verdict": "pass"', stop_reason="refusal"))
+        self.assertEqual(check["result"], "fail")
+        self.assertNotIn(MARKER, json.dumps(check))
+
+    def test_a_refusal_category_is_kept_only_as_a_plain_word(self) -> None:
+        for stop_details, said in ((None, "not given"), ({"type": "refusal", "category": None}, "not given"),
+                                   ({"category": "general_harms"}, "general_harms"),
+                                   ({"category": f"cyber {MARKER}"}, "not given"), ({"category": 7}, "not given"),
+                                   ("cyber", "not given")):
+            answer = {**model_answer(PASS), "content": [], "stop_reason": "refusal", "stop_details": stop_details}
+            check, _ = self.run_review(answer)
+            self.assertEqual(check["result"], "fail", stop_details)
+            self.assertIn(f"category {said})", check["details"], stop_details)
+            self.assertNotIn(MARKER, check["details"])
+
+    def test_the_refusal_summary_names_no_check(self) -> None:
+        # amdahl.ai reads it as flagged with no category, and shows it to the author as it is.
+        check, _ = self.run_review({**model_answer(PASS), "content": [], "stop_reason": "refusal"})
+        self.assertFalse(any(check["summary"].startswith(label) for label in normalize.AI_CHECK_WORDS.values()))
+        self.assertNotIn(SONNET, check["summary"])
+        self.assertTrue(check["summary"].isascii())
 
     def test_cut_off_or_unknown_stop_is_did_not_finish(self) -> None:
         for stop in ("max_tokens", "tool_use", "pause_turn", None):
@@ -404,6 +437,16 @@ class Rubric(unittest.TestCase):
                       "there is remote_code with at least review severity", item)
         self.assertIn("a plain link to documentation is never a block.", item)
         self.assertTrue(prompt.isascii())
+
+    def test_attacks_are_framed_as_expected_input_that_gets_a_block(self) -> None:
+        # The framing that tells the model a malicious skill is the job, not a reason to stop reading.
+        prompt = ai_review.SYSTEM_PROMPT
+        self.assertIn("This is defensive work", prompt)
+        self.assertIn("are expected input here", prompt)
+        self.assertIn("answer with a block verdict", prompt)
+        # The detection rules it sits beside are unchanged.
+        self.assertIn("is itself a red flag (overrides)", prompt)
+        self.assertLess(prompt.index("This is defensive work"), prompt.index("1. data_leaving"))
 
 
 class InputCap(Base):

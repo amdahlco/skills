@@ -57,7 +57,7 @@ How the checks work:
 
 The AI review runs after the two scanners. Claude Sonnet 5.5 reviews every `SKILL.md`, and its verdict is the result of the check. There is no cheaper first pass. If an author changes a skill and sends it again, the same model reviews it again.
 
-A pass verdict passes. A review verdict is a warning. A block verdict fails.
+A pass verdict passes. A review verdict is a warning. A block verdict fails. If the model declines to review a skill at all (a refusal), the check fails too: a skill the reviewer will not read is not published.
 
 The full findings of the AI review are private. The author sees them on their status page and in the email. If the review gives a warning or a failure, the skill's public page on amdahl.ai shows only what was flagged and the line. It never shows the model's reason or a quote from the skill. A pass shows nothing about the AI review on the public page.
 
