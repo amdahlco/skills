@@ -20,3 +20,7 @@ updates:
     groups:
       scanners:
         patterns: ["*"]
+    # Major scanner bumps change verdicts and break the verdict tests; take them by hand.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
