@@ -44,6 +44,8 @@ install_venv() {  # $1 = venv name, $2 = lock file
 
 echo "Installing Cisco skill-scanner $SKILL_SCANNER_VERSION"
 install_venv skill-scanner cisco-skill-scanner.txt
+# --no-deps skips resolution, so check the lock still meets the scanner's own requirements.
+"$dest/skill-scanner/bin/python" -m pip check --disable-pip-version-check
 
 echo "Installing Betterleaks $BETTERLEAKS_VERSION ($bl_asset)"
 tarball="$dest/betterleaks_${BETTERLEAKS_VERSION}_${bl_asset}.tar.gz"
