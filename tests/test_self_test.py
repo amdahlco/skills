@@ -154,6 +154,35 @@ class SelfTest(unittest.TestCase):
         self.write_ai(rows)
         self.assertEqual(self.check(), 1)
 
+    def test_a_refusal_on_the_injection_sample_is_its_fail_and_is_logged(self) -> None:
+        self.dir.mkdir()
+        handoff.write_private(self.dir / "scanners.json", GOOD_SCANNERS)
+        rows = good_ai()
+        rows[1] = normalize.refused_ai_review(ai_review.MODEL, DAY, "cyber")
+        self.write_ai(rows)
+        self.assertEqual(self.check(), 0)
+        self.assertIn("injection: Amdahl AI review gave fail because the model refused: The model declined to "
+                      "review this SKILL.md (stop_reason refusal, category cyber)", self.log)
+
+    def test_a_refusal_on_a_benign_sample_fails_the_test(self) -> None:
+        self.dir.mkdir()
+        handoff.write_private(self.dir / "scanners.json", GOOD_SCANNERS)
+        for position, sample in ((0, "clean"), (3, "large")):
+            rows = good_ai()
+            rows[position] = normalize.refused_ai_review(ai_review.MODEL, DAY, "general_harms")
+            self.write_ai(rows)
+            self.assertEqual(self.check(), 1, sample)
+            self.assertIn(f"{sample}: Amdahl AI review gave fail, expected one of ['pass']", self.log)
+
+    def test_a_refusal_on_the_remote_sample_lists_no_remote_code_finding(self) -> None:
+        self.dir.mkdir()
+        handoff.write_private(self.dir / "scanners.json", GOOD_SCANNERS)
+        rows = good_ai()
+        rows[4] = normalize.refused_ai_review(ai_review.MODEL, DAY, "cyber")
+        self.write_ai(rows)
+        self.assertEqual(self.check(), 1)
+        self.assertIn("remote: Amdahl AI review listed no remote_code finding", self.log)
+
     def test_the_remote_sample_must_be_flagged_as_remote_code(self) -> None:
         self.dir.mkdir()
         handoff.write_private(self.dir / "scanners.json", GOOD_SCANNERS)

@@ -11,7 +11,8 @@ Today the only reason is BUDGET, and only the AI review's row carries it.
 Severity map (Cisco skill-scanner): none, info, low -> pass; medium -> warn;
 high, critical -> fail; anything unknown -> warn. Betterleaks gives a
 confidence instead (see normalize_betterleaks). The AI review gives a verdict:
-pass -> pass, review -> warn, block -> fail. A scanner or a review that errors
+pass -> pass, review -> warn, block -> fail. A model that declines to review
+the skill at all (a refusal) -> fail (refused_ai_review). A scanner or a review that errors
 or returns output we cannot read becomes `warn` with the summary
 "Scanner did not finish". A Cisco report that does not show it covered the
 whole skill is at least `warn` (fail closed): a missing field, a failed
@@ -337,3 +338,26 @@ def normalize_ai_review(review: dict[str, Any], model: str, checked_at: str) -> 
             text += f' Quote: "{quote}"'
         lines.append(text)
     return _check(AI_REVIEW, result, summary, checked_at, _clip_block(lines, DETAILS_MAX))
+
+
+# The AI review's summary when the model declined to review the skill. The author reads it.
+REFUSED_SUMMARY = ("The AI review declined to read this skill, so it cannot be published. Remove any step "
+                   "that could harm the user or send their data away, then send the skill again.")
+
+
+def refused_ai_review(model: str, checked_at: str, category: str | None) -> dict[str, str]:
+    """The AI review's check when the model declined to review the skill (stop_reason refusal): a fail.
+
+    Fail closed: a skill the reviewer will not even read is not safe to publish.
+    The summary names no check, so amdahl.ai reads it as flagged with no
+    category. Details start like normalize_ai_review's ("Verdict: refused, from
+    <model>."), then give the refusal category from Anthropic's stop_details.
+    They never hold the skill's text.
+    """
+    lines = [
+        f"Verdict: refused, from {model}. The model saw only the SKILL.md text, with no tools.",
+        f"The model declined to review this SKILL.md (stop_reason refusal, category "
+        f"{clean_text(category or 'not given', 40)}). A skill the reviewer will not read is not safe to "
+        "publish, so the check fails.",
+    ]
+    return _check(AI_REVIEW, "fail", REFUSED_SUMMARY, checked_at, "\n".join(lines))
