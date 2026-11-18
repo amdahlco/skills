@@ -2,7 +2,7 @@
 
 This repo runs the security checks and keeps the public mirror for [amdahl.ai/skills](https://amdahl.ai/skills), a library of go-to-market skills. The code in this repo is open source.
 
-A skill is a folder named after the skill, with a `SKILL.md` file in it. The file follows the [Agent Skills](https://agentskills.io/specification) format. It teaches an AI agent one GTM task, such as discovery call notes or a pipeline review. Most skills are that one file. A folder skill, such as system-diagram, also holds the scripts it runs.
+A skill is a folder named after the skill, with a `SKILL.md` file in it. The file follows the [Agent Skills](https://agentskills.io/specification) format. It teaches an AI agent one GTM task, such as competitor mentions from calls or a discovery question audit. Most skills are that one file. A folder skill, such as system-diagram, also holds the scripts it runs.
 
 ## Install a skill
 
@@ -10,7 +10,7 @@ Install from [amdahl.ai/skills](https://amdahl.ai/skills). Each skill's page giv
 
 - Hand the page to your agent and let it walk you through it.
 - For a single-file skill, download its `SKILL.md` (the Raw link on the page) and save it as `<name>/SKILL.md` in your agent's skills folder: `~/.claude/skills/` for Claude Code.
-- Copy the command on the page, `npx amdahl skills add <publisher>/<skill>`, and run it. At a terminal it asks one question: this project, or every project on your computer. It puts the skill in the skills folder of each agent it finds: `.claude/skills/<name>/` for Claude Code, and `.agents/skills/<name>/` for Codex, Cursor and other agents. It needs Node.js 20 or later.
+- Copy the command on the page, `npx amdahl skills add <publisher>/<skill>`, and run it. At a terminal it asks one question: this project, or every project on your computer. It puts the skill in the skills folder of each agent it finds: `.claude/skills/<name>/` for Claude Code, and `.agents/skills/<name>/` for Codex, Cursor and other agents. It needs Node.js 22 or later.
 
 For a single-file skill, the command saves its `SKILL.md` as `<name>/SKILL.md` in that skills folder. For a folder skill, the command downloads the whole folder from amdahl.ai as one `.tar.gz` file and unpacks it into `<name>/` there. Either way, it checks the download against the checksum amdahl.ai lists, and writes nothing if the check fails. Do not save only the `SKILL.md` of a folder skill: the skill cannot run without its other files.
 
