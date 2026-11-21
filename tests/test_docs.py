@@ -207,7 +207,8 @@ class Security(unittest.TestCase):
         used = set()
         for path in (ROOT / ".github" / "workflows").glob("*.yml"):
             used |= set(re.findall(r"secrets\.([A-Z0-9_]+)", path.read_text(encoding="utf-8")))
-        self.assertEqual(used, {"SKILLS_SCAN_TOKEN", "SKILLS_BOT_PRIVATE_KEY", "SKILLS_REVIEW_ANTHROPIC_KEY"})
+        self.assertEqual(used, {"SKILLS_SCAN_TOKEN", "SKILLS_BOT_PRIVATE_KEY", "SKILLS_REVIEW_ANTHROPIC_KEY",
+                                "BOT_APP_ID", "BOT_APP_PRIVATE_KEY"})
         for name in used:
             self.assertIn(f"`{name}`", self.text, name)
 
