@@ -44,6 +44,10 @@ two were approved by agu on 2026-10-22.
 - **Repo secrets.** The repo holds two secrets, `SKILLS_SCAN_TOKEN` (used by `scan-queue.yml`)
   and `SKILLS_BOT_PRIVATE_KEY` (the bot's key, used by `mirror.yml` and `keepalive.yml`), plus
   the variable `SKILLS_BOT_CLIENT_ID`.
+- **Organization secrets the Glossary check reads.** `glossary.yml` calls the reusable workflow
+  of amdahlco/amdahl-system-map and passes it `BOT_APP_ID` and `BOT_APP_PRIVATE_KEY`, the
+  organization's review bot App. The called workflow uses them only to read the glossary repo.
+  They reach no other step of this repo.
 - **A model API key. Needs agu's sign-off; not approved yet.** The repo also holds
   `SKILLS_REVIEW_ANTHROPIC_KEY`, the Anthropic API key for the AI security review. Only one step
   gets it: the "AI security review" step of `scan-queue.yml`, and the step of the same name in
